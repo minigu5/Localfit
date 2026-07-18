@@ -55,9 +55,9 @@ def scan() -> None:
     console.print(table)
 
 
-@app.command()
-def update() -> None:
-    """Fetch the latest recommendation rules and trained model index."""
+def _refresh_data() -> None:
+    """Unconditionally re-fetch rules.json and recommend-model.json from
+    their configured URLs (used by `omm upgrade` for a full data sync)."""
     config = load_config()
 
     rules_url = config.get("rules_url")
@@ -104,7 +104,7 @@ def upgrade() -> None:
         raise typer.Exit(1)
 
     console.print("[green]omm reinstalled from the latest source.[/green]")
-    update()
+    _refresh_data()
 
 
 def _add_escape_to_cancel(question: questionary.Question) -> questionary.Question:
@@ -130,7 +130,9 @@ def recommend() -> None:
     info = scan_hardware()
     config = load_config()
 
-    artifact = predictor.load_model(config.get("model_url"))
+    artifact, changed = predictor.load_model_with_change_note(config.get("model_url"))
+    if changed:
+        console.print("[dim]Fetched updated recommendation data from GitHub.[/dim]")
     if artifact and artifact.get("candidates"):
         ranked = predictor.rank_candidates(artifact, info)
         viable = [(c, speed) for c, speed in ranked if speed > 0][:10]
@@ -153,6 +155,15 @@ def recommend() -> None:
         return
 
     console.print("[dim]No trained model available, falling back to static rules.[/dim]")
+    rules_url = config.get("rules_url")
+    if rules_url:
+        try:
+            _, rules_changed = rules_mod.refresh_rules_with_change_note(rules_url)
+            if rules_changed:
+                console.print("[dim]Fetched updated rules from GitHub.[/dim]")
+        except requests.RequestException:
+            pass
+
     has_gpu = info.vram_total_gb is not None
     available_gb = info.vram_total_gb if has_gpu else info.ram_total_gb
 

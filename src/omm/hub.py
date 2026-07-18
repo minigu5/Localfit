@@ -15,8 +15,8 @@ import requests
 HF_API = "https://huggingface.co/api/models/{repo_id}"
 HF_DOWNLOAD = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
 
-# Small curated index of popular GGUF models. Not exhaustive - `omm update`
-# is meant to replace/extend this from a hosted index later.
+# Small curated index of popular GGUF models. Not exhaustive - `omm search`
+# and `omm recommend` pull from a larger hosted candidate list instead.
 CURATED_INDEX: dict[str, tuple[str, str]] = {
     "tinyllama-1.1b-q4": (
         "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",

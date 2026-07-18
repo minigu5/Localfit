@@ -15,14 +15,14 @@ def test_upgrade_reinstalls_via_pipx_then_refreshes_data(monkeypatch):
         lambda args, **kwargs: calls.append(args)
         or subprocess.CompletedProcess(args, returncode=0, stdout="", stderr=""),
     )
-    update_calls = []
-    monkeypatch.setattr(cli, "update", lambda: update_calls.append(1))
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
 
     result = runner.invoke(cli.app, ["upgrade"])
 
     assert result.exit_code == 0, result.stdout
     assert calls == [["pipx", "install", "--force", cli.REPO_URL]]
-    assert update_calls == [1]
+    assert refresh_calls == [1]
     assert "reinstalled" in result.stdout.lower()
 
 
@@ -31,14 +31,14 @@ def test_upgrade_reports_error_when_pipx_missing(monkeypatch):
         raise FileNotFoundError("pipx")
 
     monkeypatch.setattr(cli.subprocess, "run", _raise)
-    update_calls = []
-    monkeypatch.setattr(cli, "update", lambda: update_calls.append(1))
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
 
     result = runner.invoke(cli.app, ["upgrade"])
 
     assert result.exit_code == 1
     assert "pipx not found" in result.stdout
-    assert update_calls == []
+    assert refresh_calls == []
 
 
 def test_upgrade_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatch):
@@ -49,11 +49,11 @@ def test_upgrade_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatc
             args, returncode=1, stdout="", stderr="boom"
         ),
     )
-    update_calls = []
-    monkeypatch.setattr(cli, "update", lambda: update_calls.append(1))
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
 
     result = runner.invoke(cli.app, ["upgrade"])
 
     assert result.exit_code == 1
     assert "boom" in result.stdout
-    assert update_calls == []
+    assert refresh_calls == []

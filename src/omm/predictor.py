@@ -45,6 +45,15 @@ def load_model(url: str | None) -> dict | None:
     return load_cached_model()
 
 
+def load_model_with_change_note(url: str | None) -> tuple[dict | None, bool]:
+    """Like load_model, but also reports whether the result differs from
+    what was already cached, so callers can tell the user when fresh data
+    was actually pulled from the network (vs. an unchanged or failed fetch)."""
+    previous = load_cached_model()
+    artifact = load_model(url)
+    return artifact, artifact != previous
+
+
 def rank_candidates(artifact: dict, hw: HardwareInfo) -> list[tuple[dict, float]]:
     trees = artifact["trees"]
     has_gpu = hw.vram_total_gb is not None

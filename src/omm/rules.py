@@ -49,6 +49,14 @@ def fetch_rules(url: str) -> list[dict]:
     return rules
 
 
+def refresh_rules_with_change_note(url: str) -> tuple[list[dict], bool]:
+    """Like fetch_rules, but also reports whether the fetched rules differ
+    from what was already cached."""
+    previous = json.loads(RULES_PATH.read_text()) if RULES_PATH.exists() else None
+    fetched = fetch_rules(url)
+    return fetched, fetched != previous
+
+
 def matching_rules(rules: list[dict], available_gb: float, has_gpu: bool) -> list[dict]:
     matches = []
     for rule in rules:
