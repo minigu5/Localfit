@@ -1,5 +1,6 @@
 """omm CLI entry point (apt/brew-style command routing)."""
 
+import subprocess
 from datetime import datetime, timezone
 
 import questionary
@@ -23,6 +24,8 @@ app = typer.Typer(
     no_args_is_help=True,
 )
 console = Console()
+
+REPO_URL = "git+https://github.com/minigu5/Localfit.git"
 
 
 @app.command()
@@ -77,6 +80,31 @@ def update() -> None:
             )
         except (requests.RequestException, ValueError) as e:
             console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
+
+
+@app.command()
+def upgrade() -> None:
+    """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
+    console.print(f"Upgrading omm from {REPO_URL} ...")
+    try:
+        result = subprocess.run(
+            ["pipx", "install", "--force", REPO_URL],
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        console.print(
+            "[red]pipx not found. Install it first, or rerun the installer:[/red]\n"
+            "  curl -fsSL https://raw.githubusercontent.com/minigu5/Localfit/main/install.sh | sh"
+        )
+        raise typer.Exit(1)
+
+    if result.returncode != 0:
+        console.print(f"[red]pipx install failed:[/red]\n{result.stderr}")
+        raise typer.Exit(1)
+
+    console.print("[green]omm reinstalled from the latest source.[/green]")
+    update()
 
 
 def _add_escape_to_cancel(question: questionary.Question) -> questionary.Question:
