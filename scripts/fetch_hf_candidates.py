@@ -14,6 +14,7 @@ import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+from omm.featurize import parse_param_count_billions  # noqa: E402
 from omm.hub import CURATED_INDEX  # noqa: E402
 from omm.linker import sanitize_ollama_tag  # noqa: E402
 
@@ -56,6 +57,10 @@ def fetch_trending_candidates() -> list[dict]:
     for model in resp.json():
         filename = pick_gguf_file(model.get("siblings", []))
         if filename is None:
+            continue
+        # Skip repos whose param count we can't parse from id/filename -
+        # they'd otherwise fall back to 0 and get mis-ranked as tiny/fast.
+        if parse_param_count_billions(f"{model['id']} {filename}") is None:
             continue
         candidates.append(
             {
