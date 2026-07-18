@@ -206,7 +206,11 @@ def install(model_name: str) -> None:
 @app.command()
 def remove(filename: str) -> None:
     """Remove a model and clean up all symlinks/manifests."""
-    entry = registry.load_registry().get(filename)
+    reg = registry.load_registry()
+    entry = reg.get(filename)
+    if entry is None and not filename.lower().endswith(".gguf"):
+        filename = f"{filename}.gguf"
+        entry = reg.get(filename)
     if entry is None:
         console.print(f"[red]{filename} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)

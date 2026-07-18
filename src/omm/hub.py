@@ -64,6 +64,8 @@ def resolve_model(model_name: str) -> ResolvedModel:
     if "/" in model_name:
         if ":" in model_name:
             repo_id, filename = model_name.split(":", 1)
+            if not filename.lower().endswith(".gguf"):
+                filename = f"{filename}.gguf"
         else:
             repo_id, filename = model_name, None
             candidates = _list_gguf_files(repo_id)
