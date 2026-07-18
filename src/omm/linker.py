@@ -18,7 +18,24 @@ from pathlib import Path
 from omm.gguf import read_gguf_metadata
 from omm.hashutil import sha256_file
 
-LMSTUDIO_MODELS_DIR = Path.home() / ".cache" / "lm-studio" / "models"
+
+def lmstudio_home_dir() -> Path:
+    """LM Studio's data dir. Newer versions default to ~/.lmstudio, but keep
+    using ~/.cache/lm-studio (the old default) if that's what's already
+    there - LM Studio itself does this via a ~/.lmstudio-home-pointer file
+    when it finds a pre-existing legacy install. Confirmed on a real 0.4.19
+    Homebrew install where the pointer redirected to ~/.cache/lm-studio.
+    """
+    pointer = Path.home() / ".lmstudio-home-pointer"
+    if pointer.exists():
+        return Path(pointer.read_text().strip())
+    if (Path.home() / ".cache" / "lm-studio").exists():
+        return Path.home() / ".cache" / "lm-studio"
+    return Path.home() / ".lmstudio"
+
+
+def lmstudio_models_dir() -> Path:
+    return lmstudio_home_dir() / "models"
 
 
 def ollama_models_dir() -> Path:
@@ -29,7 +46,7 @@ def ollama_models_dir() -> Path:
 
 
 def is_lmstudio_installed() -> bool:
-    return (Path.home() / ".cache" / "lm-studio").exists()
+    return lmstudio_home_dir().exists()
 
 
 def is_ollama_installed() -> bool:
@@ -70,14 +87,14 @@ def _lmstudio_publisher_repo(repo_id: str | None, filename: str) -> tuple[str, s
 
 def link_lmstudio(gguf_path: Path, repo_id: str | None) -> Path:
     publisher, repo = _lmstudio_publisher_repo(repo_id, gguf_path.name)
-    dst = LMSTUDIO_MODELS_DIR / publisher / repo / gguf_path.name
+    dst = lmstudio_models_dir() / publisher / repo / gguf_path.name
     _symlink(gguf_path, dst)
     return dst
 
 
 def unlink_lmstudio(filename: str, repo_id: str | None) -> None:
     publisher, repo = _lmstudio_publisher_repo(repo_id, filename)
-    dst = LMSTUDIO_MODELS_DIR / publisher / repo / filename
+    dst = lmstudio_models_dir() / publisher / repo / filename
     if dst.is_symlink():
         dst.unlink()
         for parent in (dst.parent, dst.parent.parent):
