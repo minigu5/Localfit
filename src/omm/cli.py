@@ -137,6 +137,7 @@ def install(model_name: str) -> None:
         resolved = resolve_model(model_name)
     except ModelResolutionError as e:
         console.print(f"[red]{e}[/red]")
+        _print_install_suggestions(model_name)
         raise typer.Exit(1) from e
 
     url, filename, repo_id = resolved.url, resolved.filename, resolved.repo_id
@@ -282,6 +283,30 @@ def search(query: str) -> None:
             desc = c.get("description") or ""
             console.print(f"  {label}  [dim]{desc}[/dim]")
         console.print()
+
+
+def _print_install_suggestions(query: str) -> None:
+    config = load_config()
+    pool = search_mod.local_candidate_pool(config.get("model_url"))
+    suggestions = search_mod.suggest_similar(query, pool, limit=3)
+
+    existing_labels = {s.get("name") or s.get("repo_id") for s in suggestions}
+    if len(suggestions) < 3:
+        for hit in search_mod.search_huggingface(query, limit=5):
+            if len(suggestions) >= 3:
+                break
+            label = hit.get("name") or hit.get("repo_id")
+            if label in existing_labels:
+                continue
+            suggestions.append(hit)
+            existing_labels.add(label)
+
+    if not suggestions:
+        return
+
+    console.print("[yellow]이런 모델을 찾으셨나요?[/yellow]")
+    for s in suggestions:
+        console.print(f"  - {s.get('name') or s.get('repo_id')}")
 
 
 def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float | None) -> None:
