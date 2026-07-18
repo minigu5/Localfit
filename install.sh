@@ -13,6 +13,29 @@ else
     INSTALL_SPEC="omm[nvidia] @ $REPO_URL"
 fi
 
+# run_apt() runs as root directly, or via sudo if available and needed -
+# bare Docker containers are usually root already (no sudo binary at all).
+run_apt() {
+    if [ "$(id -u)" = "0" ]; then
+        apt-get "$@"
+    elif command -v sudo >/dev/null 2>&1; then
+        sudo apt-get "$@"
+    else
+        return 1
+    fi
+}
+
+# Minimal Debian/Ubuntu images (e.g. a bare `docker run -it ubuntu bash`)
+# often ship without python3 at all, and even when python3 is present,
+# python3-venv (which provides ensurepip) is a separate package that's
+# easy to miss - without it, pipx's own venv creation fails with a
+# cryptic "ensurepip is not available" error. Bootstrap both upfront
+# when we're clearly on such a system.
+if ! command -v python3 >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    echo "python3 not found, installing it via apt..."
+    run_apt update -qq && run_apt install -y --no-install-recommends python3 python3-venv python3-pip || true
+fi
+
 if ! command -v python3 >/dev/null 2>&1; then
     echo "python3 not found. Install Python 3.10+ first: https://www.python.org/downloads/" >&2
     exit 1
@@ -24,9 +47,14 @@ if [ "$PY_OK" != "1" ]; then
     exit 1
 fi
 
-# Run pipx either as a direct command (brew install, or once PATH catches
-# up) or as `python3 -m pipx` (works right after a pip --user install,
-# before PATH is refreshed in this shell).
+if ! python3 -c "import ensurepip" >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
+    echo "python3-venv not found (needed by pipx), installing it via apt..."
+    run_apt update -qq && run_apt install -y --no-install-recommends python3-venv python3-pip || true
+fi
+
+# Run pipx either as a direct command (brew/apt install, or once PATH
+# catches up) or as `python3 -m pipx` (works right after a pip --user
+# install, before PATH is refreshed in this shell).
 run_pipx() {
     if command -v pipx >/dev/null 2>&1; then
         pipx "$@"
@@ -42,6 +70,12 @@ if ! command -v pipx >/dev/null 2>&1 && ! python3 -m pipx --version >/dev/null 2
         # tens of seconds to minutes if the formula index is stale, and
         # pipx's version rarely matters enough to need the latest index.
         HOMEBREW_NO_AUTO_UPDATE=1 brew install pipx
+    elif command -v apt-get >/dev/null 2>&1 && run_apt update -qq && run_apt install -y --no-install-recommends pipx; then
+        # Ubuntu 23.04+/Debian 12+ ship a pipx package that correctly pulls
+        # in python3-venv as a dependency - preferred over --user pip when
+        # available since it avoids PEP-668 "externally-managed-environment"
+        # entirely.
+        :
     elif python3 -m pip install --user --quiet pipx 2>/dev/null; then
         :
     else
