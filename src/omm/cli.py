@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import questionary
 import requests
 import typer
+from prompt_toolkit.keys import Keys
 from rich.console import Console
 from rich.table import Table
 
@@ -78,6 +79,21 @@ def update() -> None:
             console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
 
 
+def _add_escape_to_cancel(question: questionary.Question) -> questionary.Question:
+    """questionary only aborts on Ctrl+C/Ctrl+Q by default; make Escape do
+    the same so `.ask()` returns None instead of requiring Ctrl+C."""
+
+    def _abort(event) -> None:
+        event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+
+    question.application.key_bindings.add(Keys.Escape, eager=True)(_abort)
+    return question
+
+
+def _ask_select(question: questionary.Question):
+    return _add_escape_to_cancel(question).ask()
+
+
 @app.command()
 def recommend() -> None:
     """Scan hardware and suggest a model to install, ranked by a model
@@ -101,7 +117,7 @@ def recommend() -> None:
             )
             for c, speed in viable
         ]
-        selected = questionary.select("Pick a model to install:", choices=choices).ask()
+        selected = _ask_select(questionary.select("Pick a model to install:", choices=choices))
         if selected is None:
             console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
@@ -123,7 +139,7 @@ def recommend() -> None:
         questionary.Choice(title=f"{r['name']} - {r['description']}", value=r["name"])
         for r in matches
     ]
-    selected = questionary.select("Pick a model to install:", choices=choices).ask()
+    selected = _ask_select(questionary.select("Pick a model to install:", choices=choices))
     if selected is None:
         console.print("[yellow]Cancelled.[/yellow]")
         raise typer.Exit(0)
