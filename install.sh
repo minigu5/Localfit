@@ -103,6 +103,17 @@ fi
 echo "Installing omm from $REPO_URL ..."
 run_pipx install --force "$INSTALL_SPEC"
 
+# `pipx ensurepath` (via the `userpath` package) writes the PATH line to
+# ~/.profile, which login shells source but plain interactive shells don't
+# (e.g. many Docker/container terminals, like Kasm's, only source ~/.bashrc
+# and never touch ~/.profile) - so a brand new shell still can't find omm.
+# Belt-and-suspenders: make sure ~/.bashrc also gets the PATH line.
+BASHRC="$HOME/.bashrc"
+LOCAL_BIN="$HOME/.local/bin"
+if [ -f "$BASHRC" ] && ! grep -qF "$LOCAL_BIN" "$BASHRC" 2>/dev/null; then
+    printf '\nexport PATH="%s:$PATH"\n' "$LOCAL_BIN" >> "$BASHRC"
+fi
+
 echo
 echo "Done. If 'omm' isn't found, open a new shell (pipx just updated your PATH)."
 echo "Try:  omm scan"
