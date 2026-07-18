@@ -314,6 +314,60 @@ def _print_install_suggestions(query: str) -> None:
         console.print(f"  - {s.get('name') or s.get('repo_id')}")
 
 
+@app.command()
+def apply() -> None:
+    """Retry linking any installed models that couldn't be linked before
+    (e.g. LM Studio or Ollama was installed after `omm install` ran)."""
+    reg = registry.load_registry()
+    if not reg:
+        console.print("No models installed via omm yet.")
+        raise typer.Exit(0)
+
+    linked_count = 0
+    skipped_missing = 0
+    already_ok = 0
+
+    for filename, entry in reg.items():
+        dest = MODELS_DIR / filename
+        if not dest.exists():
+            skipped_missing += 1
+            continue
+
+        linked = entry.get("linked", {})
+        new_linked: dict[str, bool] = {}
+        update_fields: dict[str, str] = {}
+        changed = False
+
+        if not linked.get("lmstudio") and linker.is_lmstudio_installed():
+            try:
+                linker.link_lmstudio(dest, entry.get("repo_id"))
+                new_linked["lmstudio"] = True
+                changed = True
+            except linker.LinkError as e:
+                console.print(f"[yellow]{filename}: LM Studio link skipped: {e}[/yellow]")
+
+        if not linked.get("ollama") and linker.is_ollama_installed():
+            ollama_tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
+            try:
+                linker.link_ollama(dest, ollama_tag)
+                new_linked["ollama"] = True
+                update_fields["ollama_name"] = ollama_tag
+                changed = True
+            except linker.LinkError as e:
+                console.print(f"[yellow]{filename}: Ollama link skipped: {e}[/yellow]")
+
+        if changed:
+            registry.upsert_entry(filename, linked=new_linked, **update_fields)
+            linked_count += 1
+        else:
+            already_ok += 1
+
+    console.print(
+        f"[green]{linked_count} model(s) newly linked.[/green] "
+        f"{already_ok} already up to date, {skipped_missing} skipped (file missing)."
+    )
+
+
 def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float | None) -> None:
     if tokens_per_sec is None:
         # Ollama daemon wasn't reachable - not a real "it doesn't run" signal,
