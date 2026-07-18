@@ -48,3 +48,4 @@ run_pipx install --force "$REPO_URL"
 echo
 echo "Done. If 'omm' isn't found, open a new shell (pipx just updated your PATH)."
 echo "Try:  omm scan"
+echo "Tip: run 'omm --install-completion' once (then restart your shell) to enable Tab completion for install/remove."

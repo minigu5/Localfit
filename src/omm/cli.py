@@ -9,6 +9,7 @@ from rich.console import Console
 from rich.table import Table
 
 from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, telemetry
+from omm.completion import complete_install_name, complete_remove_filename
 from omm.config import MODELS_DIR, load_config
 from omm.downloader import DownloadError, download_file
 from omm.hardware import scan_hardware
@@ -131,7 +132,9 @@ def recommend() -> None:
 
 
 @app.command()
-def install(model_name: str) -> None:
+def install(
+    model_name: str = typer.Argument(..., autocompletion=complete_install_name),
+) -> None:
     """Download a model into the central hub and link it into installed engines."""
     try:
         resolved = resolve_model(model_name)
@@ -205,7 +208,9 @@ def install(model_name: str) -> None:
 
 
 @app.command()
-def remove(filename: str) -> None:
+def remove(
+    filename: str = typer.Argument(..., autocompletion=complete_remove_filename),
+) -> None:
     """Remove a model and clean up all symlinks/manifests."""
     reg = registry.load_registry()
     entry = reg.get(filename)
