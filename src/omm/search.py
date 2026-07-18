@@ -28,6 +28,35 @@ FAMILY_KEYWORDS: list[str] = [
     "Yi",
 ]
 
+# HF is full of spam repos claiming to be "distilled" or "fine-tuned" from
+# closed, never-publicly-released weights (Claude/Opus, GPT-4/5, Gemini, ...).
+# That's not a real technique - those weights were never downloadable, so the
+# claim is fabricated. These repos exist to farm downloads/likes off famous
+# names and ship broken or nonstandard GGUFs (fake architecture tags, garbage
+# quantizations) that fail to load once a user actually installs them. Filter
+# them out before they ever reach a suggestion.
+FAKE_PROVENANCE_MARKERS: list[str] = [
+    "claude",
+    "anthropic",
+    "opus",
+    "sonnet-4",
+    "sonnet4",
+    "chatgpt",
+    "gpt-4",
+    "gpt4",
+    "gpt-5",
+    "gpt5",
+    "gemini",
+    "bard",
+]
+
+
+def _claims_fake_provenance(text: str) -> bool:
+    lowered = text.lower()
+    return any(
+        re.search(rf"\b{re.escape(marker)}\b", lowered) for marker in FAKE_PROVENANCE_MARKERS
+    )
+
 
 def guess_family(text: str) -> str:
     for family in FAMILY_KEYWORDS:
@@ -85,6 +114,8 @@ def search_huggingface(query: str, limit: int = 20, timeout: float = 3.0) -> lis
     for item in payload:
         repo_id = item.get("id") or item.get("modelId")
         if not repo_id:
+            continue
+        if _claims_fake_provenance(repo_id):
             continue
         results.append(
             {

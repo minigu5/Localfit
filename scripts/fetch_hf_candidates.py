@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from omm.featurize import parse_param_count_billions  # noqa: E402
 from omm.hub import CURATED_INDEX  # noqa: E402
 from omm.linker import sanitize_ollama_tag  # noqa: E402
+from omm.search import _claims_fake_provenance  # noqa: E402
 
 HF_SEARCH_URL = "https://huggingface.co/api/models"
 CANDIDATE_LIMIT = 30
@@ -55,6 +56,8 @@ def fetch_trending_candidates() -> list[dict]:
 
     candidates = []
     for model in resp.json():
+        if _claims_fake_provenance(model["id"]):
+            continue
         filename = pick_gguf_file(model.get("siblings", []))
         if filename is None:
             continue

@@ -57,6 +57,34 @@ def test_search_huggingface_returns_empty_list_on_request_error(monkeypatch):
     assert search_mod.search_huggingface("qwen") == []
 
 
+def test_search_huggingface_filters_out_fake_provenance_repos(monkeypatch):
+    class _Resp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return [
+                {"id": "Brian6145/Qwen3.6-27B-Claude-Opus-DeepSeek-Distilled-GGUF"},
+                {"id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF"},
+            ]
+
+    monkeypatch.setattr(search_mod.requests, "get", lambda *a, **k: _Resp())
+
+    results = search_mod.search_huggingface("mistral")
+
+    repo_ids = [c["repo_id"] for c in results]
+    assert "Brian6145/Qwen3.6-27B-Claude-Opus-DeepSeek-Distilled-GGUF" not in repo_ids
+    assert "TheBloke/Mistral-7B-Instruct-v0.2-GGUF" in repo_ids
+
+
+def test_claims_fake_provenance_detects_closed_model_brand_names():
+    assert search_mod._claims_fake_provenance(
+        "Brian6145/Qwen3.6-27B-Claude-Opus-DeepSeek-Distilled-GGUF"
+    )
+    assert search_mod._claims_fake_provenance("some-model-gpt-4-distill-GGUF")
+    assert not search_mod._claims_fake_provenance("TheBloke/Mistral-7B-Instruct-v0.2-GGUF")
+
+
 def test_match_candidates_prefers_substring_match():
     pool = [
         {"name": "mistral-7b-instruct-q4", "repo_id": "TheBloke/Mistral-7B-Instruct-v0.2-GGUF"},
