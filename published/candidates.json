@@ -18,12 +18,6 @@
     "description": "Curated default"
   },
   {
-    "name": "antirez-deepseek-v4-gguf",
-    "repo_id": "antirez/deepseek-v4-gguf",
-    "filename": "DeepSeek-V4-Flash-DSpark-support.gguf",
-    "description": "3,257,913 downloads on HuggingFace"
-  },
-  {
     "name": "deepreinforce-ai-ornith-1.0-9b-gguf",
     "repo_id": "deepreinforce-ai/Ornith-1.0-9B-GGUF",
     "filename": "ornith-1.0-9b-Q4_K_M.gguf",
