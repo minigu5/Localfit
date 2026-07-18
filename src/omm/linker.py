@@ -223,3 +223,61 @@ def unlink_ollama(model_name: str) -> None:
         manifest_path.parent.rmdir()
     except OSError:
         pass
+
+
+# --- Autoremove (broken symlink cleanup) ------------------------------
+
+
+def autoremove_lmstudio() -> int:
+    """Delete broken LM Studio symlinks (source .gguf no longer exists).
+    Returns the number removed."""
+    base = lmstudio_models_dir()
+    if not base.exists():
+        return 0
+
+    removed = 0
+    for path in list(base.rglob("*")):
+        if path.is_symlink() and not path.exists():
+            path.unlink()
+            removed += 1
+            for parent in (path.parent, path.parent.parent):
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+    return removed
+
+
+def autoremove_ollama() -> tuple[int, int]:
+    """Delete broken Ollama model-layer blob symlinks and any manifests
+    that reference them. Returns (blobs_removed, manifests_removed)."""
+    blobs_dir = ollama_models_dir() / "blobs"
+    manifests_root = ollama_models_dir() / "manifests"
+    if not blobs_dir.exists():
+        return (0, 0)
+
+    broken_digests = set()
+    for blob in blobs_dir.iterdir():
+        if blob.is_symlink() and not blob.exists():
+            broken_digests.add(blob.name)
+            blob.unlink()
+
+    manifests_removed = 0
+    if broken_digests and manifests_root.exists():
+        for manifest_path in list(manifests_root.rglob("latest")):
+            try:
+                manifest = json.loads(manifest_path.read_text())
+            except (json.JSONDecodeError, OSError):
+                continue
+            layer_digests = {
+                layer["digest"].replace(":", "-") for layer in manifest.get("layers", [])
+            }
+            if layer_digests & broken_digests:
+                manifest_path.unlink()
+                manifests_removed += 1
+                try:
+                    manifest_path.parent.rmdir()
+                except OSError:
+                    pass
+
+    return (len(broken_digests), manifests_removed)
