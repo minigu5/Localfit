@@ -27,7 +27,14 @@ from omm.config import MODELS_DIR, load_config
 from omm.downloader import DownloadError, download_file
 from omm.hardware import scan_hardware
 from omm.hashutil import sha256_file
-from omm.hub import AmbiguousModelError, ModelResolutionError, rank_quant_variants, resolve_model
+from omm.hub import (
+    HF_DOWNLOAD,
+    AmbiguousModelError,
+    ModelResolutionError,
+    rank_quant_variants,
+    remote_file_sha256,
+    resolve_model,
+)
 
 app = typer.Typer(
     name="omm",
@@ -377,6 +384,39 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     )
 
 
+def _link_model(dest, repo_id: str | None, ollama_tag: str) -> dict[str, bool]:
+    """Link a downloaded .gguf into LM Studio/Ollama, printing a skip
+    notice for whichever engine isn't installed or fails to link. Shared
+    by `install` and `update` since both need the exact same behavior
+    after a fresh (or refreshed) download."""
+    linked = {"lmstudio": False, "ollama": False}
+
+    if linker.is_lmstudio_installed():
+        try:
+            linker.link_lmstudio(dest, repo_id)
+            linked["lmstudio"] = True
+        except linker.LinkError as e:
+            console.print(f"[yellow]LM Studio link skipped: {e}[/yellow]")
+    else:
+        console.print("[dim]LM Studio not detected, skipping link.[/dim]")
+
+    if linker.is_ollama_installed():
+        try:
+            has_chat_template = linker.link_ollama(dest, ollama_tag)
+            linked["ollama"] = True
+            if not has_chat_template:
+                console.print(
+                    "[yellow]This GGUF has no embedded chat template - "
+                    "Ollama will fall back to raw completion (no chat formatting).[/yellow]"
+                )
+        except linker.LinkError as e:
+            console.print(f"[yellow]Ollama link skipped: {e}[/yellow]")
+    else:
+        console.print("[dim]Ollama not detected, skipping link.[/dim]")
+
+    return linked
+
+
 @app.command()
 def install(
     model_name: str = typer.Argument(..., autocompletion=complete_install_name),
@@ -425,35 +465,13 @@ def install(
     console.print("Verifying checksum...")
     sha256 = sha256_file(dest)
 
-    linked = {"lmstudio": False, "ollama": False}
     ollama_tag = linker.sanitize_ollama_tag(filename)
-
-    if linker.is_lmstudio_installed():
-        try:
-            linker.link_lmstudio(dest, repo_id)
-            linked["lmstudio"] = True
-        except linker.LinkError as e:
-            console.print(f"[yellow]LM Studio link skipped: {e}[/yellow]")
-    else:
-        console.print("[dim]LM Studio not detected, skipping link.[/dim]")
-
-    if linker.is_ollama_installed():
-        try:
-            has_chat_template = linker.link_ollama(dest, ollama_tag)
-            linked["ollama"] = True
-            if not has_chat_template:
-                console.print(
-                    "[yellow]This GGUF has no embedded chat template - "
-                    "Ollama will fall back to raw completion (no chat formatting).[/yellow]"
-                )
-        except linker.LinkError as e:
-            console.print(f"[yellow]Ollama link skipped: {e}[/yellow]")
-    else:
-        console.print("[dim]Ollama not detected, skipping link.[/dim]")
+    linked = _link_model(dest, repo_id, ollama_tag)
 
     registry.upsert_entry(
         filename,
         sha256=sha256,
+        version=sha256[:7],
         source=url,
         size_bytes=dest.stat().st_size,
         installed_at=datetime.now(timezone.utc).isoformat(),
@@ -538,6 +556,160 @@ def remove(
         raise typer.Exit(1)
 
     _remove_one(filename, entry)
+
+
+def _lookup_entry(filename: str, reg: dict) -> tuple[str, dict] | tuple[None, None]:
+    """Find a registry entry by exact filename, retrying with a `.gguf`
+    suffix appended (mirrors the lookup `remove` already does)."""
+    entry = reg.get(filename)
+    if entry is None and not filename.lower().endswith(".gguf"):
+        filename = f"{filename}.gguf"
+        entry = reg.get(filename)
+    if entry is None:
+        return None, None
+    return filename, entry
+
+
+def _entry_version(entry: dict) -> str:
+    return entry.get("version") or (entry.get("sha256") or "")[:7] or "unknown"
+
+
+@app.command()
+def info(
+    model_name: str = typer.Argument(..., autocompletion=complete_remove_filename),
+) -> None:
+    """Show name, version, size, and linked-program run commands for an installed model."""
+    model_name = _resolve_ref(model_name)
+    reg = registry.load_registry()
+    filename, entry = _lookup_entry(model_name, reg)
+    if entry is None:
+        console.print(f"[red]{model_name} is not installed via omm. See `omm list`.[/red]")
+        raise typer.Exit(1)
+
+    size_gb = entry.get("size_bytes", 0) / (1024**3)
+    linked = entry.get("linked", {})
+
+    table = Table(title=filename, show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Repo", entry.get("repo_id") or "(direct URL install)")
+    table.add_row("Version", _entry_version(entry))
+    table.add_row("Size", f"{size_gb:.2f} GB")
+    table.add_row("Installed at", entry.get("installed_at", "unknown"))
+    table.add_row(
+        "LM Studio",
+        "linked (visible in LM Studio app)" if linked.get("lmstudio") else "not linked",
+    )
+    if linked.get("ollama"):
+        ollama_tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
+        table.add_row("Ollama", f"ollama run {ollama_tag}")
+    else:
+        table.add_row("Ollama", "not linked")
+
+    console.print(table)
+
+
+def _update_one(filename: str, entry: dict) -> str:
+    """Refresh one installed model against its source. Returns "updated",
+    "up_to_date", or "skipped". HF-repo installs check a cheap remote hash
+    first and only re-download on a mismatch; direct-URL installs have no
+    such endpoint, so they re-download to a temp file and compare hashes
+    before swapping it in."""
+    dest = MODELS_DIR / filename
+    repo_id = entry.get("repo_id")
+    old_sha256 = entry.get("sha256")
+
+    if repo_id:
+        remote_sha256 = remote_file_sha256(repo_id, filename)
+        if remote_sha256 is None:
+            console.print(
+                f"[yellow]{filename}: could not check for updates "
+                "(no repo/LFS info), skipped.[/yellow]"
+            )
+            return "skipped"
+        if remote_sha256 == old_sha256:
+            return "up_to_date"
+
+        url = HF_DOWNLOAD.format(repo_id=repo_id, filename=filename)
+        try:
+            download_file(url, dest)
+        except DownloadError as e:
+            console.print(f"[red]{filename}: update download failed: {e}[/red]")
+            return "skipped"
+        new_sha256 = sha256_file(dest)
+    else:
+        source = entry.get("source")
+        if not source:
+            console.print(f"[yellow]{filename}: no source URL on record, skipped.[/yellow]")
+            return "skipped"
+
+        tmp = dest.with_name(dest.name + ".update")
+        try:
+            download_file(source, tmp)
+        except DownloadError as e:
+            console.print(f"[red]{filename}: update download failed: {e}[/red]")
+            tmp.unlink(missing_ok=True)
+            tmp.with_suffix(tmp.suffix + ".part").unlink(missing_ok=True)
+            return "skipped"
+
+        new_sha256 = sha256_file(tmp)
+        if new_sha256 == old_sha256:
+            tmp.unlink(missing_ok=True)
+            return "up_to_date"
+        tmp.replace(dest)
+
+    ollama_tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
+    linked = _link_model(dest, repo_id, ollama_tag)
+    registry.upsert_entry(
+        filename,
+        sha256=new_sha256,
+        version=new_sha256[:7],
+        size_bytes=dest.stat().st_size,
+        installed_at=datetime.now(timezone.utc).isoformat(),
+        ollama_name=ollama_tag,
+        linked=linked,
+    )
+    return "updated"
+
+
+@app.command()
+def update(
+    model_name: str = typer.Argument(None, autocompletion=complete_remove_filename),
+) -> None:
+    """Refresh an installed model against its source, re-downloading only
+    if the source has changed since install. With no argument (or `all`),
+    checks every model installed via omm."""
+    reg = registry.load_registry()
+
+    if model_name is None or model_name.lower() == "all":
+        if not reg:
+            console.print("No models installed via omm yet.")
+            raise typer.Exit(0)
+        if not _ask_confirm(f"Check {len(reg)} model(s) for updates?"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+
+        counts = {"updated": 0, "up_to_date": 0, "skipped": 0}
+        for filename, entry in list(reg.items()):
+            counts[_update_one(filename, entry)] += 1
+        console.print(
+            f"[green]{counts['updated']} updated, {counts['up_to_date']} up to date, "
+            f"{counts['skipped']} skipped.[/green]"
+        )
+        return
+
+    resolved = _resolve_ref(model_name)
+    filename, entry = _lookup_entry(resolved, reg)
+    if entry is None:
+        console.print(f"[red]{resolved} is not installed via omm. See `omm list`.[/red]")
+        raise typer.Exit(1)
+
+    result = _update_one(filename, entry)
+    if result == "up_to_date":
+        console.print(f"[green]{filename} is already up to date ({_entry_version(entry)}).[/green]")
+    elif result == "updated":
+        fresh_entry = registry.load_registry()[filename]
+        console.print(f"[green]{filename} updated to {_entry_version(fresh_entry)}.[/green]")
 
 
 @app.command(name="list")

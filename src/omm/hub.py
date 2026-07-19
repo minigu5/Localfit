@@ -16,6 +16,7 @@ from omm.featurize import parse_param_count_billions, parse_quant_bits
 
 HF_API = "https://huggingface.co/api/models/{repo_id}"
 HF_DOWNLOAD = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
+HF_PATHS_INFO = "https://huggingface.co/api/models/{repo_id}/paths-info/main"
 
 # Small curated index of popular GGUF models. Not exhaustive - `omm search`
 # and `omm recommend` pull from a larger hosted candidate list instead.
@@ -108,6 +109,27 @@ def _list_gguf_files(repo_id: str) -> list[str]:
 
     siblings = resp.json().get("siblings", [])
     return [s["rfilename"] for s in siblings if s["rfilename"].endswith(".gguf")]
+
+
+def remote_file_sha256(repo_id: str, filename: str) -> str | None:
+    """Current LFS sha256 of `filename` in `repo_id`'s main branch, via HF's
+    paths-info API - no need to download the file to check it. Returns None
+    if the request fails, the file isn't listed, or it isn't stored as LFS
+    (gguf files always are in practice, so this covers "can't verify")."""
+    try:
+        resp = requests.post(
+            HF_PATHS_INFO.format(repo_id=repo_id),
+            json={"paths": [filename]},
+            timeout=15,
+        )
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+
+    entries = resp.json()
+    if not entries:
+        return None
+    return entries[0].get("lfs", {}).get("sha256")
 
 
 def resolve_model(model_name: str) -> ResolvedModel:
