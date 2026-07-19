@@ -25,7 +25,7 @@ from omm.config import MODELS_DIR, load_config
 from omm.downloader import DownloadError, download_file
 from omm.hardware import scan_hardware
 from omm.hashutil import sha256_file
-from omm.hub import ModelResolutionError, resolve_model
+from omm.hub import AmbiguousModelError, ModelResolutionError, rank_quant_variants, resolve_model
 
 app = typer.Typer(
     name="omm",
@@ -267,6 +267,30 @@ def _resolve_ref(arg: str) -> str:
     return results[idx - 1]
 
 
+def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
+    """Rank the ambiguous repo's .gguf files by fit against this PC's RAM/VRAM
+    and let the user pick one, cursor defaulted to the best-fitting, highest
+    quality option."""
+    info = scan_hardware()
+    has_gpu = info.vram_total_gb is not None
+    available_gb = info.vram_total_gb if has_gpu else info.ram_total_gb
+
+    variants = rank_quant_variants(error.candidates, available_gb)
+    choices = []
+    for v in variants:
+        if v.fits is True:
+            note = f"적합, ~{v.required_gb:.1f}GB 필요"
+        elif v.fits is False:
+            note = f"용량 부족 가능, ~{v.required_gb:.1f}GB 필요 (보유 {available_gb:.1f}GB)"
+        else:
+            note = "적합 여부 확인 불가"
+        choices.append(questionary.Choice(title=f"{v.filename}  ({note})", value=v.filename))
+
+    return _ask_select(
+        questionary.select(f"'{error.repo_id}'의 양자화 버전을 선택하세요:", choices=choices)
+    )
+
+
 @app.command()
 def install(
     model_name: str = typer.Argument(..., autocompletion=complete_install_name),
@@ -275,6 +299,13 @@ def install(
     model_name = _resolve_ref(model_name)
     try:
         resolved = resolve_model(model_name)
+    except AmbiguousModelError as e:
+        chosen = _pick_quant_variant(e)
+        if chosen is None:
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        install(f"{e.repo_id}:{chosen}")
+        return
     except ModelResolutionError as e:
         console.print(f"[red]{e}[/red]")
         _print_install_suggestions(model_name)

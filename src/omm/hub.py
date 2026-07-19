@@ -12,6 +12,8 @@ from dataclasses import dataclass
 
 import requests
 
+from omm.featurize import parse_param_count_billions, parse_quant_bits
+
 HF_API = "https://huggingface.co/api/models/{repo_id}"
 HF_DOWNLOAD = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
 
@@ -37,11 +39,55 @@ class ModelResolutionError(Exception):
     pass
 
 
+class AmbiguousModelError(ModelResolutionError):
+    """Raised when a bare `org/repo` resolves to more than one .gguf file,
+    so the caller can offer a quantization-level choice instead of just
+    failing (see `rank_quant_variants`)."""
+
+    def __init__(self, repo_id: str, candidates: list[str]):
+        self.repo_id = repo_id
+        self.candidates = candidates
+        super().__init__(
+            f"Repo '{repo_id}' has multiple .gguf files, specify one: "
+            f"{repo_id}:<filename>\nOptions: {', '.join(candidates)}"
+        )
+
+
 @dataclass
 class ResolvedModel:
     url: str
     filename: str
     repo_id: str | None  # None when installed from a direct URL (no HF repo)
+
+
+@dataclass
+class QuantVariant:
+    filename: str
+    quant_bits: float | None
+    required_gb: float | None  # None when quant/param count couldn't be parsed
+    fits: bool | None  # None when required_gb couldn't be estimated
+
+
+_RAM_OVERHEAD_FACTOR = 1.2  # context/runtime slack on top of raw weight size
+
+
+def rank_quant_variants(candidates: list[str], available_gb: float) -> list[QuantVariant]:
+    """Rank a repo's .gguf files by hardware fit, best-fitting-and-highest-
+    quality first, so the CLI can default the picker's cursor there."""
+    variants = []
+    for filename in candidates:
+        quant_bits = parse_quant_bits(filename)
+        param_b = parse_param_count_billions(filename)
+        if quant_bits is not None and param_b is not None:
+            required_gb = param_b * quant_bits / 8 * _RAM_OVERHEAD_FACTOR
+            fits = required_gb <= available_gb
+        else:
+            required_gb = None
+            fits = None
+        variants.append(QuantVariant(filename, quant_bits, required_gb, fits))
+
+    variants.sort(key=lambda v: (v.fits is not True, -(v.quant_bits or 0)))
+    return variants
 
 
 def _list_gguf_files(repo_id: str) -> list[str]:
@@ -72,10 +118,7 @@ def resolve_model(model_name: str) -> ResolvedModel:
             if not candidates:
                 raise ModelResolutionError(f"No .gguf files found in HF repo '{repo_id}'.")
             if len(candidates) > 1:
-                raise ModelResolutionError(
-                    f"Repo '{repo_id}' has multiple .gguf files, specify one: "
-                    f"{repo_id}:<filename>\nOptions: {', '.join(candidates)}"
-                )
+                raise AmbiguousModelError(repo_id, candidates)
             filename = candidates[0]
         url = HF_DOWNLOAD.format(repo_id=repo_id, filename=filename)
         return ResolvedModel(url=url, filename=filename, repo_id=repo_id)
