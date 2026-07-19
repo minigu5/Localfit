@@ -1,3 +1,5 @@
+import subprocess
+
 from rich.console import Console
 from rich.progress import Progress
 from typer.testing import CliRunner
@@ -30,6 +32,7 @@ def test_install_spec_adds_nvidia_extra_on_non_darwin(monkeypatch):
 
 def test_upgrade_reinstalls_via_pipx_then_refreshes_data(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
     calls = []
 
     def fake_popen(args, **kwargs):
@@ -49,6 +52,8 @@ def test_upgrade_reinstalls_via_pipx_then_refreshes_data(monkeypatch):
 
 
 def test_upgrade_reports_error_when_pipx_missing(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
+
     def _raise(*args, **kwargs):
         raise FileNotFoundError("pipx")
 
@@ -64,6 +69,7 @@ def test_upgrade_reports_error_when_pipx_missing(monkeypatch):
 
 
 def test_upgrade_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
     monkeypatch.setattr(
         cli.subprocess,
         "Popen",
@@ -77,6 +83,93 @@ def test_upgrade_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatc
     assert result.exit_code == 1
     assert "boom" in result.stdout
     assert refresh_calls == []
+
+
+def test_upgrade_skips_reinstall_when_already_up_to_date(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: "abc1234" * 5 + "abc12345")
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda: "abc1234" * 5 + "abc12345")
+    popen_calls = []
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: popen_calls.append(a) or _FakeProc([]))
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
+
+    result = runner.invoke(cli.app, ["upgrade"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "up to date" in result.stdout.lower()
+    assert popen_calls == []
+    assert refresh_calls == [1]
+
+
+def test_upgrade_reinstalls_when_installed_commit_differs_from_remote(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli, "_installed_commit", lambda: "old" * 13 + "old")
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda: "new" * 13 + "new")
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        return _FakeProc(["creating virtual environment...\n", "done!\n"])
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli, "_refresh_data", lambda: None)
+
+    result = runner.invoke(cli.app, ["upgrade"])
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == [["pipx", "install", "--force", cli.REPO_URL]]
+    assert "up to date" not in result.stdout.lower()
+
+
+def test_installed_commit_reads_vcs_info_from_direct_url_json(monkeypatch):
+    class _FakeDist:
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            return '{"url": "https://x", "vcs_info": {"commit_id": "deadbeef", "vcs": "git"}}'
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", lambda name: _FakeDist())
+
+    assert cli._installed_commit() == "deadbeef"
+
+
+def test_installed_commit_returns_none_for_editable_dev_install(monkeypatch):
+    class _FakeDist:
+        def read_text(self, name):
+            return '{"dir_info": {"editable": true}, "url": "file:///repo"}'
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", lambda name: _FakeDist())
+
+    assert cli._installed_commit() is None
+
+
+def test_installed_commit_returns_none_when_package_not_found(monkeypatch):
+    def _raise(name):
+        raise cli.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", _raise)
+
+    assert cli._installed_commit() is None
+
+
+def test_remote_head_commit_parses_git_ls_remote_output(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout="abcdef1234567890\trefs/heads/main\n", stderr=""
+        ),
+    )
+
+    assert cli._remote_head_commit() == "abcdef1234567890"
+
+
+def test_remote_head_commit_returns_none_when_git_missing(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(cli.subprocess, "run", _raise)
+
+    assert cli._remote_head_commit() is None
 
 
 def test_run_pipx_install_advances_progress_on_known_stage_lines(monkeypatch):

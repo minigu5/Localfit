@@ -1,5 +1,7 @@
 """omm CLI entry point (apt/brew-style command routing)."""
 
+import importlib.metadata
+import json
 import platform
 import subprocess
 from datetime import datetime, timezone
@@ -100,6 +102,40 @@ def _refresh_data() -> None:
             console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
 
 
+_BARE_REPO_URL = REPO_URL.removeprefix("git+")
+
+
+def _installed_commit() -> str | None:
+    """The commit `omm` was actually installed from, read from pip's PEP 610
+    `direct_url.json` - present whenever pip installed from a VCS URL (i.e.
+    every real `pipx install`). None for editable/local-path dev installs,
+    which carry no vcs_info to compare against."""
+    try:
+        raw = importlib.metadata.distribution("omm").read_text("direct_url.json")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    if not raw:
+        return None
+    return json.loads(raw).get("vcs_info", {}).get("commit_id")
+
+
+def _remote_head_commit(ref: str = "main") -> str | None:
+    """Latest commit on the given ref of the omm repo, via `git ls-remote`
+    (no GitHub API rate limit, no auth needed for a public repo)."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", _BARE_REPO_URL, ref],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.split()[0]
+
+
 # pipx gives no byte-level install progress, but it does print a fixed,
 # ordered sequence of stage lines to stdout - use those as real (if coarse)
 # progress checkpoints instead of an indeterminate animation that never
@@ -133,6 +169,13 @@ def _run_pipx_install(args: list[str], progress: Progress, task_id) -> subproces
 @app.command()
 def upgrade() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
+    installed = _installed_commit()
+    latest = _remote_head_commit() if installed else None
+    if installed and latest and installed == latest:
+        console.print(f"[green]omm is already up to date ({installed[:7]}).[/green]")
+        _refresh_data()
+        return
+
     console.print(f"Upgrading omm from {REPO_URL} ...")
     try:
         with Progress(
