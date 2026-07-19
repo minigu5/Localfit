@@ -161,18 +161,21 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import sys
 from pathlib import Path
 
 from omm import config
 
 _MAX_SEEN = 50
-_EMPTY: dict[str, list[str]] = {"seen": [], "last_results": []}
 
 
 def _session_path() -> Path | None:
+    # Use the OS-level stdin fd (always 0 on POSIX) rather than
+    # sys.stdin.fileno() - test runners and other harnesses often swap
+    # sys.stdin for an object whose .fileno() raises before os.ttyname()
+    # ever runs, which would short-circuit this to "no session" even when
+    # fd 0 itself is a real tty.
     try:
-        tty = os.ttyname(sys.stdin.fileno())
+        tty = os.ttyname(0)
     except OSError:
         return None
     digest = hashlib.sha1(tty.encode()).hexdigest()
