@@ -178,6 +178,16 @@ def _ask_select(question: questionary.Question):
     return _add_escape_to_cancel(question).ask()
 
 
+def _ask_confirm(message: str, default: bool = False) -> bool:
+    """Yes/no prompt that answers on the y/n keypress itself (no Enter
+    needed) via questionary's auto_enter. questionary.confirm's internal
+    key bindings are already merged by the time we get the Question object,
+    so (unlike _ask_select) we can't bolt an Escape binding on here -
+    Ctrl+C/Ctrl+Q still cancel via questionary's own bindings."""
+    answer = questionary.confirm(message, default=default, auto_enter=True).ask()
+    return bool(answer)
+
+
 @app.command()
 def recommend() -> None:
     """Scan hardware and suggest a model to install, ranked by a model
@@ -363,7 +373,7 @@ def install(
     )
 
     if linked["ollama"]:
-        if typer.confirm("모델 속도를 측정하고 결과를 서버로 보낼까요?", default=False):
+        if _ask_confirm("모델 속도를 측정하고 결과를 서버로 보낼까요?"):
             console.print("Benchmarking...")
             tokens_per_sec = benchmark.benchmark_ollama(ollama_tag)
             if tokens_per_sec:

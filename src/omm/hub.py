@@ -91,8 +91,21 @@ def rank_quant_variants(candidates: list[str], available_gb: float) -> list[Quan
 
 
 def _list_gguf_files(repo_id: str) -> list[str]:
-    resp = requests.get(HF_API.format(repo_id=repo_id), timeout=15)
-    resp.raise_for_status()
+    try:
+        resp = requests.get(HF_API.format(repo_id=repo_id), timeout=15)
+        resp.raise_for_status()
+    except requests.HTTPError as e:
+        status = e.response.status_code if e.response is not None else None
+        if status in (401, 403):
+            raise ModelResolutionError(
+                f"HF repo '{repo_id}' is private or gated - requires an access token."
+            ) from e
+        if status == 404:
+            raise ModelResolutionError(f"HF repo '{repo_id}' not found.") from e
+        raise ModelResolutionError(f"HF API request failed for '{repo_id}' ({status}).") from e
+    except requests.RequestException as e:
+        raise ModelResolutionError(f"Could not reach Hugging Face for '{repo_id}': {e}") from e
+
     siblings = resp.json().get("siblings", [])
     return [s["rfilename"] for s in siblings if s["rfilename"].endswith(".gguf")]
 

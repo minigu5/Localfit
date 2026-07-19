@@ -28,11 +28,12 @@ def _stub_successful_install(monkeypatch, isolated_omm_home):
 
 def test_install_runs_benchmark_and_telemetry_on_yes(isolated_omm_home, monkeypatch):
     filename = _stub_successful_install(monkeypatch, isolated_omm_home)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: True)
     monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 42.0)
     sent = []
     monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append((event, force)))
 
-    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"], input="y\n")
+    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
     assert result.exit_code == 0, result.stdout
     assert "42.0" in result.stdout or "42" in result.stdout
@@ -42,13 +43,35 @@ def test_install_runs_benchmark_and_telemetry_on_yes(isolated_omm_home, monkeypa
 
 def test_install_skips_benchmark_and_telemetry_on_no(isolated_omm_home, monkeypatch):
     _stub_successful_install(monkeypatch, isolated_omm_home)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: False)
     bench_calls = []
     monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: bench_calls.append(tag) or 42.0)
     sent = []
     monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append((event, force)))
 
-    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"], input="n\n")
+    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
     assert result.exit_code == 0, result.stdout
     assert bench_calls == []
     assert sent == []
+
+
+def test_ask_confirm_uses_questionary_with_auto_enter(monkeypatch):
+    captured = {}
+
+    class FakeQuestion:
+        def ask(self):
+            return True
+
+    def fake_confirm(message, default=False, auto_enter=True):
+        captured["message"] = message
+        captured["default"] = default
+        captured["auto_enter"] = auto_enter
+        return FakeQuestion()
+
+    monkeypatch.setattr(cli.questionary, "confirm", fake_confirm)
+
+    result = cli._ask_confirm("질문?", default=False)
+
+    assert result is True
+    assert captured == {"message": "질문?", "default": False, "auto_enter": True}
