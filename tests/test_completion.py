@@ -29,6 +29,19 @@ def test_complete_install_name_filters_by_prefix(monkeypatch):
     assert result == ["mistral-7b-instruct-q4"]
 
 
+def test_complete_install_name_includes_session_seen_names(monkeypatch):
+    monkeypatch.setattr(completion.predictor, "load_cached_model", lambda: None)
+    monkeypatch.setattr(
+        completion.session_cache,
+        "load_seen",
+        lambda: ["org/repo:some-file-Q4_K_M.gguf"],
+    )
+
+    result = completion.complete_install_name("org/repo")
+
+    assert result == ["org/repo:some-file-Q4_K_M.gguf"]
+
+
 def test_complete_remove_filename_reads_registry_and_filters(monkeypatch):
     monkeypatch.setattr(
         completion.registry,

@@ -4,7 +4,7 @@ recommend-model artifact (never a live fetch)."""
 
 from __future__ import annotations
 
-from omm import hub, predictor, registry
+from omm import hub, predictor, registry, session_cache
 
 
 def complete_install_name(incomplete: str) -> list[str]:
@@ -13,6 +13,8 @@ def complete_install_name(incomplete: str) -> list[str]:
     artifact = predictor.load_cached_model()
     if artifact:
         names.update(c.get("name") for c in artifact.get("candidates", []) if c.get("name"))
+
+    names.update(session_cache.load_seen())
 
     return sorted(n for n in names if n.startswith(incomplete))
 
