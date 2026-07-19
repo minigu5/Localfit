@@ -34,6 +34,30 @@ def test_search_groups_results_by_family(monkeypatch):
     assert "mistral-7b-instruct-q4" in result.stdout
 
 
+def test_search_prints_numbered_refs_and_records_session(monkeypatch):
+    monkeypatch.setattr(cli, "load_config", lambda: {"model_url": None})
+    monkeypatch.setattr(
+        cli.search_mod,
+        "local_candidate_pool",
+        lambda model_url: [
+            {
+                "name": "tinyllama-1.1b-q4",
+                "repo_id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                "description": "Curated default",
+            },
+        ],
+    )
+    monkeypatch.setattr(cli.search_mod, "search_huggingface", lambda query, **kwargs: [])
+    recorded = []
+    monkeypatch.setattr(cli.session_cache, "record_results", lambda refs: recorded.append(refs))
+
+    result = runner.invoke(cli.app, ["search", "tiny"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "[1] tinyllama-1.1b-q4" in result.stdout
+    assert recorded == [["tinyllama-1.1b-q4"]]
+
+
 def test_search_exits_nonzero_when_nothing_matches(monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: {"model_url": None})
     monkeypatch.setattr(search_mod, "local_candidate_pool", lambda model_url: [])

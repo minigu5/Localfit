@@ -12,7 +12,7 @@ from rich.console import Console
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, telemetry
+from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, session_cache, telemetry
 from omm.completion import complete_install_name, complete_remove_filename
 from omm.config import MODELS_DIR, load_config
 from omm.downloader import DownloadError, download_file
@@ -159,12 +159,14 @@ def recommend() -> None:
             console.print("[red]No model is predicted to run on this hardware.[/red]")
             raise typer.Exit(1)
 
+        refs = [f"{c['repo_id']}:{c['filename']}" for c, speed in viable]
+        session_cache.record_seen(refs)
         choices = [
             questionary.Choice(
                 title=f"{c['name']} (~{speed:.0f} tok/s predicted) - {c.get('description', '')}",
-                value=f"{c['repo_id']}:{c['filename']}",
+                value=ref,
             )
-            for c, speed in viable
+            for (c, speed), ref in zip(viable, refs)
         ]
         selected = _ask_select(questionary.select("Pick a model to install:", choices=choices))
         if selected is None:
@@ -193,6 +195,7 @@ def recommend() -> None:
         console.print("[red]No model in the current rules fits this hardware.[/red]")
         raise typer.Exit(1)
 
+    session_cache.record_seen([r["name"] for r in matches])
     choices = [
         questionary.Choice(title=f"{r['name']} - {r['description']}", value=r["name"])
         for r in matches
@@ -318,21 +321,24 @@ def list_models() -> None:
         raise typer.Exit(0)
 
     table = Table(title="omm models")
+    table.add_column("#", justify="right")
     table.add_column("Filename", style="cyan")
     table.add_column("Size", justify="right")
     table.add_column("LM Studio")
     table.add_column("Ollama")
 
-    for filename, entry in reg.items():
+    for idx, (filename, entry) in enumerate(reg.items(), start=1):
         size_gb = entry.get("size_bytes", 0) / (1024**3)
         linked = entry.get("linked", {})
         table.add_row(
+            str(idx),
             filename,
             f"{size_gb:.2f} GB",
             "[green]yes[/green]" if linked.get("lmstudio") else "no",
             "[green]yes[/green]" if linked.get("ollama") else "no",
         )
     console.print(table)
+    session_cache.record_results(list(reg.keys()))
 
 
 @app.command()
@@ -355,13 +361,17 @@ def search(query: str) -> None:
         raise typer.Exit(1)
 
     groups = search_mod.group_by_family(combined)
+    refs: list[str] = []
     for family in sorted(groups):
         console.print(f"[bold cyan]==> {family}[/bold cyan]")
         for c in groups[family]:
             ref = search_mod.install_ref(c)
+            refs.append(ref)
             desc = c.get("description") or ""
-            console.print(f"  {ref}  [dim]{desc}[/dim]")
+            console.print(f"  [{len(refs)}] {ref}  [dim]{desc}[/dim]")
         console.print()
+
+    session_cache.record_results(refs)
 
 
 def _print_install_suggestions(query: str) -> None:
