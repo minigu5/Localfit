@@ -117,7 +117,7 @@ def scan() -> None:
 
 def _refresh_data() -> None:
     """Unconditionally re-fetch rules.json and recommend-model.json from
-    their configured URLs (used by `omm upgrade` for a full data sync)."""
+    their configured URLs (used by `omm update` for a full data sync)."""
     config = load_config()
 
     rules_url = config.get("rules_url")
@@ -207,7 +207,7 @@ def _run_pipx_install(args: list[str], progress: Progress, task_id) -> subproces
 
 
 @app.command()
-def upgrade() -> None:
+def update() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
     installed = _installed_commit()
     latest = _remote_head_commit() if installed else None
@@ -216,7 +216,7 @@ def upgrade() -> None:
         _refresh_data()
         return
 
-    console.print(f"Upgrading omm from {REPO_URL} ...")
+    console.print(f"Updating omm from {REPO_URL} ...")
     try:
         with Progress(
             SpinnerColumn(),
@@ -673,7 +673,7 @@ def _update_one(filename: str, entry: dict) -> str:
 
 
 @app.command()
-def update(
+def upgrade(
     model_name: str = typer.Argument(None, autocompletion=complete_remove_filename),
 ) -> None:
     """Refresh an installed model against its source, re-downloading only

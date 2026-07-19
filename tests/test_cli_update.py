@@ -1,174 +1,206 @@
-from pathlib import Path
+import subprocess
 
+from rich.console import Console
+from rich.progress import Progress
 from typer.testing import CliRunner
 
-from omm import cli, registry
+from omm import cli
 
 runner = CliRunner()
 
 
-def _entry(**overrides):
-    entry = {
-        "sha256": "old-hash",
-        "version": "old-has",
-        "source": "https://huggingface.co/org/repo/resolve/main/model.gguf",
-        "size_bytes": 9,
-        "installed_at": "2026-07-19T00:00:00+00:00",
-        "repo_id": "org/repo",
-        "ollama_name": "model",
-        "linked": {"lmstudio": False, "ollama": False},
-    }
-    entry.update(overrides)
-    return entry
+class _FakeProc:
+    def __init__(self, lines, returncode=0):
+        self.stdout = iter(lines)
+        self._returncode = returncode
+
+    def wait(self):
+        return self._returncode
 
 
-def _no_engines(monkeypatch):
-    monkeypatch.setattr(cli.linker, "is_lmstudio_installed", lambda: False)
-    monkeypatch.setattr(cli.linker, "is_ollama_installed", lambda: False)
+def test_install_spec_uses_bare_repo_url_on_darwin(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+
+    assert cli._install_spec() == cli.REPO_URL
 
 
-def test_update_single_repo_model_up_to_date(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    (cli.MODELS_DIR / "model.gguf").write_bytes(b"old-bytes")
-    registry.save_registry({"model.gguf": _entry(sha256="same-hash")})
-    monkeypatch.setattr(cli, "remote_file_sha256", lambda repo_id, filename: "same-hash")
+def test_install_spec_adds_nvidia_extra_on_non_darwin(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
 
-    result = runner.invoke(cli.app, ["update", "model.gguf"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "already up to date" in result.stdout
+    assert cli._install_spec() == f"omm[nvidia] @ {cli.REPO_URL}"
 
 
-def test_update_single_repo_model_redownloads_on_hash_mismatch(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    (cli.MODELS_DIR / "model.gguf").write_bytes(b"old-bytes")
-    registry.save_registry({"model.gguf": _entry(sha256="old-hash")})
-    monkeypatch.setattr(cli, "remote_file_sha256", lambda repo_id, filename: "new-hash")
+def test_update_reinstalls_via_pipx_then_refreshes_data(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
+    calls = []
 
-    def fake_download(url, dest):
-        Path(dest).write_bytes(b"new-bytes-from-upstream")
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        return _FakeProc(["creating virtual environment...\n", "done!\n"])
 
-    monkeypatch.setattr(cli, "download_file", fake_download)
-
-    result = runner.invoke(cli.app, ["update", "model.gguf"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "updated to" in result.stdout
-    assert (cli.MODELS_DIR / "model.gguf").read_bytes() == b"new-bytes-from-upstream"
-    updated = registry.load_registry()["model.gguf"]
-    assert updated["sha256"] != "old-hash"
-    assert updated["version"] == updated["sha256"][:7]
-
-
-def test_update_skips_when_remote_hash_unknown(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    (cli.MODELS_DIR / "model.gguf").write_bytes(b"old-bytes")
-    registry.save_registry({"model.gguf": _entry()})
-    monkeypatch.setattr(cli, "remote_file_sha256", lambda repo_id, filename: None)
-    monkeypatch.setattr(
-        cli, "download_file", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not download"))
-    )
-
-    result = runner.invoke(cli.app, ["update", "model.gguf"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "could not check for updates" in result.stdout
-    assert registry.load_registry()["model.gguf"]["sha256"] == "old-hash"
-
-
-def test_update_direct_url_install_matches_hash_leaves_file_untouched(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    dest = cli.MODELS_DIR / "model.gguf"
-    dest.write_bytes(b"same-bytes")
-    import hashlib
-
-    same_hash = hashlib.sha256(b"same-bytes").hexdigest()
-    registry.save_registry({"model.gguf": _entry(repo_id=None, sha256=same_hash)})
-
-    def fake_download(url, dest_path):
-        Path(dest_path).write_bytes(b"same-bytes")
-
-    monkeypatch.setattr(cli, "download_file", fake_download)
-
-    result = runner.invoke(cli.app, ["update", "model.gguf"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "already up to date" in result.stdout
-    assert dest.read_bytes() == b"same-bytes"
-    assert not (cli.MODELS_DIR / "model.gguf.update").exists()
-
-
-def test_update_direct_url_install_swaps_in_new_file_atomically(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    dest = cli.MODELS_DIR / "model.gguf"
-    dest.write_bytes(b"old-bytes")
-    registry.save_registry({"model.gguf": _entry(repo_id=None, sha256="old-hash")})
-
-    def fake_download(url, dest_path):
-        Path(dest_path).write_bytes(b"brand-new-bytes")
-
-    monkeypatch.setattr(cli, "download_file", fake_download)
-
-    result = runner.invoke(cli.app, ["update", "model.gguf"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "updated to" in result.stdout
-    assert dest.read_bytes() == b"brand-new-bytes"
-    assert not (cli.MODELS_DIR / "model.gguf.update").exists()
-
-
-def test_update_all_confirmation_cancelled_leaves_registry_untouched(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    registry.save_registry({"model.gguf": _entry()})
-    monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: False)
-    monkeypatch.setattr(
-        cli, "remote_file_sha256", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not check"))
-    )
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
 
     result = runner.invoke(cli.app, ["update"])
 
     assert result.exit_code == 0, result.stdout
-    assert "Cancelled" in result.stdout
-    assert registry.load_registry()["model.gguf"]["sha256"] == "old-hash"
+    assert calls == [["pipx", "install", "--force", cli.REPO_URL]]
+    assert refresh_calls == [1]
+    assert "reinstalled" in result.stdout.lower()
 
 
-def test_update_all_reports_summary_counts(isolated_omm_home, monkeypatch):
-    _no_engines(monkeypatch)
-    (cli.MODELS_DIR / "same.gguf").write_bytes(b"a")
-    (cli.MODELS_DIR / "changed.gguf").write_bytes(b"b")
-    registry.save_registry(
-        {
-            "same.gguf": _entry(sha256="same-hash", repo_id="org/same"),
-            "changed.gguf": _entry(sha256="old-hash", repo_id="org/changed"),
-        }
-    )
-    monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: True)
+def test_update_reports_error_when_pipx_missing(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
 
-    def fake_remote_hash(repo_id, filename):
-        return "same-hash" if repo_id == "org/same" else "new-hash"
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("pipx")
 
-    monkeypatch.setattr(cli, "remote_file_sha256", fake_remote_hash)
-
-    def fake_download(url, dest):
-        Path(dest).write_bytes(b"new-content")
-
-    monkeypatch.setattr(cli, "download_file", fake_download)
+    monkeypatch.setattr(cli.subprocess, "Popen", _raise)
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
 
     result = runner.invoke(cli.app, ["update"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "1 updated, 1 up to date, 0 skipped" in result.stdout
-
-
-def test_update_all_with_empty_registry_reports_nothing_to_do(isolated_omm_home):
-    result = runner.invoke(cli.app, ["update"])
-
-    assert result.exit_code == 0, result.stdout
-    assert "No models installed" in result.stdout
-
-
-def test_update_errors_for_uninstalled_model(isolated_omm_home):
-    result = runner.invoke(cli.app, ["update", "nothing-here.gguf"])
 
     assert result.exit_code == 1
-    assert "is not installed via omm" in result.stdout
+    assert "pipx not found" in result.stdout
+    assert refresh_calls == []
+
+
+def test_update_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: None)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "Popen",
+        lambda args, **kwargs: _FakeProc(["boom\n"], returncode=1),
+    )
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
+
+    result = runner.invoke(cli.app, ["update"])
+
+    assert result.exit_code == 1
+    assert "boom" in result.stdout
+    assert refresh_calls == []
+
+
+def test_update_skips_reinstall_when_already_up_to_date(monkeypatch):
+    monkeypatch.setattr(cli, "_installed_commit", lambda: "abc1234" * 5 + "abc12345")
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda: "abc1234" * 5 + "abc12345")
+    popen_calls = []
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda *a, **k: popen_calls.append(a) or _FakeProc([]))
+    refresh_calls = []
+    monkeypatch.setattr(cli, "_refresh_data", lambda: refresh_calls.append(1))
+
+    result = runner.invoke(cli.app, ["update"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "up to date" in result.stdout.lower()
+    assert popen_calls == []
+    assert refresh_calls == [1]
+
+
+def test_update_reinstalls_when_installed_commit_differs_from_remote(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(cli, "_installed_commit", lambda: "old" * 13 + "old")
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda: "new" * 13 + "new")
+    calls = []
+
+    def fake_popen(args, **kwargs):
+        calls.append(args)
+        return _FakeProc(["creating virtual environment...\n", "done!\n"])
+
+    monkeypatch.setattr(cli.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(cli, "_refresh_data", lambda: None)
+
+    result = runner.invoke(cli.app, ["update"])
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == [["pipx", "install", "--force", cli.REPO_URL]]
+    assert "up to date" not in result.stdout.lower()
+
+
+def test_installed_commit_reads_vcs_info_from_direct_url_json(monkeypatch):
+    class _FakeDist:
+        def read_text(self, name):
+            assert name == "direct_url.json"
+            return '{"url": "https://x", "vcs_info": {"commit_id": "deadbeef", "vcs": "git"}}'
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", lambda name: _FakeDist())
+
+    assert cli._installed_commit() == "deadbeef"
+
+
+def test_installed_commit_returns_none_for_editable_dev_install(monkeypatch):
+    class _FakeDist:
+        def read_text(self, name):
+            return '{"dir_info": {"editable": true}, "url": "file:///repo"}'
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", lambda name: _FakeDist())
+
+    assert cli._installed_commit() is None
+
+
+def test_installed_commit_returns_none_when_package_not_found(monkeypatch):
+    def _raise(name):
+        raise cli.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", _raise)
+
+    assert cli._installed_commit() is None
+
+
+def test_remote_head_commit_parses_git_ls_remote_output(monkeypatch):
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout="abcdef1234567890\trefs/heads/main\n", stderr=""
+        ),
+    )
+
+    assert cli._remote_head_commit() == "abcdef1234567890"
+
+
+def test_remote_head_commit_returns_none_when_git_missing(monkeypatch):
+    def _raise(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(cli.subprocess, "run", _raise)
+
+    assert cli._remote_head_commit() is None
+
+
+def test_run_pipx_install_advances_progress_on_known_stage_lines(monkeypatch):
+    lines = [
+        "creating virtual environment...\n",
+        "determining package name from 'x'...\n",
+        "some unrelated pip chatter\n",
+        "installing omm from spec 'x'...\n",
+        "done! ✨\n",
+        "installed package omm 0.1.0\n",
+    ]
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda args, **kwargs: _FakeProc(lines))
+
+    with Progress(console=Console(quiet=True)) as progress:
+        task_id = progress.add_task("upgrade", total=len(cli._PIPX_INSTALL_STAGES))
+        result = cli._run_pipx_install(["pipx", "install"], progress, task_id)
+        completed = progress.tasks[0].completed
+
+    assert result.returncode == 0
+    assert completed == len(cli._PIPX_INSTALL_STAGES)
+
+
+def test_run_pipx_install_stalls_at_last_reached_stage_when_lines_missing(monkeypatch):
+    lines = ["creating virtual environment...\n", "done! ✨\n"]
+    monkeypatch.setattr(cli.subprocess, "Popen", lambda args, **kwargs: _FakeProc(lines))
+
+    with Progress(console=Console(quiet=True)) as progress:
+        task_id = progress.add_task("upgrade", total=len(cli._PIPX_INSTALL_STAGES))
+        cli._run_pipx_install(["pipx", "install"], progress, task_id)
+        completed = progress.tasks[0].completed
+
+    # "creating virtual environment" (stage 1) then "done!" (stage 4) -
+    # stages 2/3 never printed, so we jump straight to 4, not fabricate 2/3.
+    assert completed == 4

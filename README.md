@@ -23,15 +23,15 @@ omm uninstall <name> # Uninstall a model and clean up its symlinks/manifests
 omm uninstall all    # Uninstall every model installed via omm
 omm list             # Show models installed via omm and their linked status
 omm info <name>      # Show a model's name, version, size, and linked-program run commands
-omm update <name>    # Refresh a model against its source if it has changed since install
-omm update           # Check every installed model for updates
+omm upgrade <name>   # Refresh a model against its source if it has changed since install
+omm upgrade          # Check every installed model for updates
 omm relink           # Re-verify and repair every installed model's LM Studio/Ollama links
 omm autoremove       # Clean up broken symlinks and orphaned partial downloads
-omm upgrade          # Reinstall omm from the latest source, then refresh rules/model data
+omm update           # Reinstall omm from the latest source, then refresh rules/model data
 omm help [command]   # Show help, same as --help
 ```
 
-`install`, `uninstall`, `info`, and `update` accept either a model name/reference or the numeric index shown by the last `omm search` or `omm list` run in that terminal. `search`/`install` mark models predicted not to run on this machine's hardware in red.
+`install`, `uninstall`, `info`, and `upgrade` accept either a model name/reference or the numeric index shown by the last `omm search` or `omm list` run in that terminal. `search`/`install` mark models predicted not to run on this machine's hardware in red.
 
 ## Development
 
