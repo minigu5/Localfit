@@ -208,11 +208,34 @@ def recommend() -> None:
     install(selected)
 
 
+def _resolve_ref(arg: str) -> str:
+    """If `arg` is a bare integer, treat it as a 1-based index into the last
+    `omm search`/`omm list` results shown in this terminal. Any non-numeric
+    arg passes through unchanged."""
+    if not arg.isdigit():
+        return arg
+
+    results = session_cache.load_last_results()
+    if not results:
+        console.print(
+            "[red]번호로 설치/삭제하려면 먼저 omm search 또는 omm list를 실행하세요.[/red]"
+        )
+        raise typer.Exit(1)
+
+    idx = int(arg)
+    if idx < 1 or idx > len(results):
+        console.print(f"[red]{idx}번은 없습니다 (1-{len(results)}).[/red]")
+        raise typer.Exit(1)
+
+    return results[idx - 1]
+
+
 @app.command()
 def install(
     model_name: str = typer.Argument(..., autocompletion=complete_install_name),
 ) -> None:
     """Download a model into the central hub and link it into installed engines."""
+    model_name = _resolve_ref(model_name)
     try:
         resolved = resolve_model(model_name)
     except ModelResolutionError as e:
@@ -289,6 +312,7 @@ def remove(
     filename: str = typer.Argument(..., autocompletion=complete_remove_filename),
 ) -> None:
     """Remove a model and clean up all symlinks/manifests."""
+    filename = _resolve_ref(filename)
     reg = registry.load_registry()
     entry = reg.get(filename)
     if entry is None and not filename.lower().endswith(".gguf"):
