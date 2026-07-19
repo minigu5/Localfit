@@ -295,9 +295,12 @@ def install(
     )
 
     if linked["ollama"]:
-        console.print("Benchmarking...")
-        tokens_per_sec = benchmark.benchmark_ollama(ollama_tag)
-        _report_telemetry(filename, repo_id, tokens_per_sec)
+        if typer.confirm("모델 속도를 측정하고 결과를 서버로 보낼까요?", default=False):
+            console.print("Benchmarking...")
+            tokens_per_sec = benchmark.benchmark_ollama(ollama_tag)
+            if tokens_per_sec:
+                console.print(f"[cyan]{tokens_per_sec:.1f} tok/s[/cyan]")
+            _report_telemetry(filename, repo_id, tokens_per_sec)
 
     console.print(f"[green]Installed {filename}[/green]")
     if linked["ollama"]:
@@ -550,7 +553,8 @@ def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float 
             "model_repo_id": repo_id,
             "engine": "ollama",
             "tokens_per_sec": round(tokens_per_sec, 2),
-        }
+        },
+        force=True,
     )
 
 
