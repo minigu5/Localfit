@@ -9,6 +9,7 @@ import requests
 import typer
 from prompt_toolkit.keys import Keys
 from rich.console import Console
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
 from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, telemetry
@@ -97,11 +98,19 @@ def upgrade() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
     console.print(f"Upgrading omm from {REPO_URL} ...")
     try:
-        result = subprocess.run(
-            ["pipx", "install", "--force", _install_spec()],
-            capture_output=True,
-            text=True,
-        )
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[cyan]Reinstalling omm via pipx...[/cyan]"),
+            BarColumn(),
+            TimeElapsedColumn(),
+            console=console,
+        ) as progress:
+            progress.add_task("upgrade", total=None)
+            result = subprocess.run(
+                ["pipx", "install", "--force", _install_spec()],
+                capture_output=True,
+                text=True,
+            )
     except FileNotFoundError:
         console.print(
             "[red]pipx not found. Install it first, or rerun the installer:[/red]\n"
