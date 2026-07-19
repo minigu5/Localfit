@@ -1,4 +1,5 @@
-"""Opt-in, best-effort telemetry. Never raises, never blocks the CLI."""
+"""Opt-in (or explicitly forced), best-effort telemetry. Never raises,
+never blocks the CLI."""
 
 from __future__ import annotations
 
@@ -9,9 +10,9 @@ import requests
 from omm.config import load_config
 
 
-def send_event(event: dict[str, Any]) -> None:
+def send_event(event: dict[str, Any], force: bool = False) -> None:
     config = load_config()
-    if not config.get("telemetry_opt_in"):
+    if not force and not config.get("telemetry_opt_in"):
         return
     endpoint = config.get("telemetry_endpoint")
     if not endpoint:
