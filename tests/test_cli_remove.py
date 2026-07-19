@@ -11,7 +11,7 @@ def test_remove_accepts_filename_without_gguf_suffix(isolated_omm_home):
     dest.write_bytes(b"fake-gguf")
     registry.save_registry({filename: {"linked": {"lmstudio": False, "ollama": False}}})
 
-    result = runner.invoke(cli.app, ["remove", "tinyllama-1.1b-chat-v1.0.Q4_K_M"])
+    result = runner.invoke(cli.app, ["uninstall", "tinyllama-1.1b-chat-v1.0.Q4_K_M"])
 
     assert result.exit_code == 0, result.stdout
     assert f"Removed {filename}" in result.stdout
@@ -24,7 +24,7 @@ def test_remove_cleans_up_orphaned_part_file(isolated_omm_home):
     cli.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     part.write_bytes(b"partial")
 
-    result = runner.invoke(cli.app, ["remove", "orphan.gguf"])
+    result = runner.invoke(cli.app, ["uninstall", "orphan.gguf"])
 
     assert result.exit_code == 0, result.stdout
     assert "orphan.gguf" in result.stdout
@@ -36,14 +36,14 @@ def test_remove_cleans_up_unregistered_complete_download(isolated_omm_home):
     cli.MODELS_DIR.mkdir(parents=True, exist_ok=True)
     dest.write_bytes(b"complete-but-unregistered")
 
-    result = runner.invoke(cli.app, ["remove", "orphan.gguf"])
+    result = runner.invoke(cli.app, ["uninstall", "orphan.gguf"])
 
     assert result.exit_code == 0, result.stdout
     assert not dest.exists()
 
 
 def test_remove_still_errors_when_nothing_on_disk(isolated_omm_home):
-    result = runner.invoke(cli.app, ["remove", "nothing-here.gguf"])
+    result = runner.invoke(cli.app, ["uninstall", "nothing-here.gguf"])
 
     assert result.exit_code == 1
     assert "is not installed via omm" in result.stdout

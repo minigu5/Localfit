@@ -308,13 +308,13 @@ def _resolve_ref(arg: str) -> str:
     results = session_cache.load_last_results()
     if not results:
         console.print(
-            "[red]번호로 설치/삭제하려면 먼저 omm search 또는 omm list를 실행하세요.[/red]"
+            "[red]Run `omm search` or `omm list` first to install/uninstall by number.[/red]"
         )
         raise typer.Exit(1)
 
     idx = int(arg)
     if idx < 1 or idx > len(results):
-        console.print(f"[red]{idx}번은 없습니다 (1-{len(results)}).[/red]")
+        console.print(f"[red]No result #{idx} (1-{len(results)}).[/red]")
         raise typer.Exit(1)
 
     return results[idx - 1]
@@ -332,15 +332,15 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     choices = []
     for v in variants:
         if v.fits is True:
-            note = f"적합, ~{v.required_gb:.1f}GB 필요"
+            note = f"fits, ~{v.required_gb:.1f}GB needed"
         elif v.fits is False:
-            note = f"용량 부족 가능, ~{v.required_gb:.1f}GB 필요 (보유 {available_gb:.1f}GB)"
+            note = f"may not fit, ~{v.required_gb:.1f}GB needed (you have {available_gb:.1f}GB)"
         else:
-            note = "적합 여부 확인 불가"
+            note = "fit unknown"
         choices.append(questionary.Choice(title=f"{v.filename}  ({note})", value=v.filename))
 
     return _ask_select(
-        questionary.select(f"'{error.repo_id}'의 양자화 버전을 선택하세요:", choices=choices)
+        questionary.select(f"Select a quantization variant for '{error.repo_id}':", choices=choices)
     )
 
 
@@ -416,7 +416,7 @@ def install(
     )
 
     if linked["ollama"]:
-        if _ask_confirm("모델 속도를 측정하고 결과를 서버로 보낼까요?"):
+        if _ask_confirm("Benchmark this model's speed and send the result to the server?"):
             console.print("Benchmarking...")
             tokens_per_sec = benchmark.benchmark_ollama(ollama_tag)
             if tokens_per_sec:
@@ -428,7 +428,7 @@ def install(
         console.print(f"  Ollama: [green]ollama run {ollama_tag}[/green]")
     if linked["lmstudio"]:
         console.print("  LM Studio: visible in your local models list")
-    console.print(f"  Uninstall with: [cyan]omm remove {filename}[/cyan]")
+    console.print(f"  Uninstall with: [cyan]omm uninstall {filename}[/cyan]")
 
 
 def _cleanup_incomplete_install(filename: str) -> bool:
@@ -444,11 +444,11 @@ def _cleanup_incomplete_install(filename: str) -> bool:
     return cleaned
 
 
-@app.command()
+@app.command(name="uninstall")
 def remove(
     filename: str = typer.Argument(..., autocompletion=complete_remove_filename),
 ) -> None:
-    """Remove a model and clean up all symlinks/manifests."""
+    """Uninstall a model and clean up all symlinks/manifests."""
     filename = _resolve_ref(filename)
     reg = registry.load_registry()
     entry = reg.get(filename)
@@ -457,7 +457,7 @@ def remove(
         entry = reg.get(filename)
     if entry is None:
         if _cleanup_incomplete_install(filename):
-            console.print(f"[green]미완료 설치 {filename} 정리 완료[/green]")
+            console.print(f"[green]Cleaned up incomplete install of {filename}[/green]")
             raise typer.Exit(0)
         console.print(f"[red]{filename} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)
@@ -557,7 +557,7 @@ def _print_install_suggestions(query: str) -> None:
     if not suggestions:
         return
 
-    console.print("[yellow]이런 모델을 찾으셨나요?[/yellow]")
+    console.print("[yellow]Did you mean one of these?[/yellow]")
     for s in suggestions:
         console.print(f"  - {search_mod.install_ref(s)}")
 
@@ -638,7 +638,7 @@ def _autoremove_incomplete_installs() -> int:
 @app.command()
 def autoremove() -> None:
     """Remove broken symlinks left behind when a model's source .gguf was
-    deleted without going through `omm remove`, plus any orphaned partial or
+    deleted without going through `omm uninstall`, plus any orphaned partial or
     unregistered downloads in the models directory."""
     lmstudio_removed = linker.autoremove_lmstudio() if linker.is_lmstudio_installed() else 0
     ollama_blobs_removed, ollama_manifests_removed = (

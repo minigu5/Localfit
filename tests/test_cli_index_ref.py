@@ -65,7 +65,7 @@ def test_remove_resolves_numeric_arg_from_last_results(isolated_omm_home, monkey
     registry.save_registry({filename: {"linked": {"lmstudio": False, "ollama": False}}})
     monkeypatch.setattr(cli.session_cache, "load_last_results", lambda: [filename])
 
-    result = runner.invoke(cli.app, ["remove", "1"])
+    result = runner.invoke(cli.app, ["uninstall", "1"])
 
     assert result.exit_code == 0, result.stdout
     assert f"Removed {filename}" in result.stdout
