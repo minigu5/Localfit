@@ -9,7 +9,14 @@ import requests
 import typer
 from prompt_toolkit.keys import Keys
 from rich.console import Console
-from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeElapsedColumn
+from rich.progress import (
+    BarColumn,
+    Progress,
+    SpinnerColumn,
+    TaskProgressColumn,
+    TextColumn,
+    TimeElapsedColumn,
+)
 from rich.table import Table
 
 from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, session_cache, telemetry
@@ -93,6 +100,36 @@ def _refresh_data() -> None:
             console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
 
 
+# pipx gives no byte-level install progress, but it does print a fixed,
+# ordered sequence of stage lines to stdout - use those as real (if coarse)
+# progress checkpoints instead of an indeterminate animation that never
+# actually reflects how far along the install is.
+_PIPX_INSTALL_STAGES = [
+    "creating virtual environment",
+    "determining package name",
+    "installing omm from spec",
+    "done!",
+    "installed package",
+]
+
+
+def _run_pipx_install(args: list[str], progress: Progress, task_id) -> subprocess.CompletedProcess:
+    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    output_lines: list[str] = []
+    stage = 0
+    for line in proc.stdout:
+        output_lines.append(line)
+        lowered = line.lower()
+        for i in range(stage, len(_PIPX_INSTALL_STAGES)):
+            if _PIPX_INSTALL_STAGES[i] in lowered:
+                stage = i + 1
+                progress.update(task_id, completed=stage)
+                break
+    returncode = proc.wait()
+    output = "".join(output_lines)
+    return subprocess.CompletedProcess(args, returncode, stdout=output, stderr=output)
+
+
 @app.command()
 def upgrade() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
@@ -102,15 +139,15 @@ def upgrade() -> None:
             SpinnerColumn(),
             TextColumn("[cyan]Reinstalling omm via pipx...[/cyan]"),
             BarColumn(),
+            TaskProgressColumn(),
             TimeElapsedColumn(),
             console=console,
         ) as progress:
-            progress.add_task("upgrade", total=None)
-            result = subprocess.run(
-                ["pipx", "install", "--force", _install_spec()],
-                capture_output=True,
-                text=True,
+            task_id = progress.add_task("upgrade", total=len(_PIPX_INSTALL_STAGES))
+            result = _run_pipx_install(
+                ["pipx", "install", "--force", _install_spec()], progress, task_id
             )
+            progress.update(task_id, completed=len(_PIPX_INSTALL_STAGES))
     except FileNotFoundError:
         console.print(
             "[red]pipx not found. Install it first, or rerun the installer:[/red]\n"
