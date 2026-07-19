@@ -307,6 +307,19 @@ def install(
     console.print(f"  Uninstall with: [cyan]omm remove {filename}[/cyan]")
 
 
+def _cleanup_incomplete_install(filename: str) -> bool:
+    dest = MODELS_DIR / filename
+    part = dest.with_suffix(dest.suffix + ".part")
+    cleaned = False
+    if part.exists():
+        part.unlink()
+        cleaned = True
+    if dest.exists():
+        dest.unlink()
+        cleaned = True
+    return cleaned
+
+
 @app.command()
 def remove(
     filename: str = typer.Argument(..., autocompletion=complete_remove_filename),
@@ -319,6 +332,9 @@ def remove(
         filename = f"{filename}.gguf"
         entry = reg.get(filename)
     if entry is None:
+        if _cleanup_incomplete_install(filename):
+            console.print(f"[green]미완료 설치 {filename} 정리 완료[/green]")
+            raise typer.Exit(0)
         console.print(f"[red]{filename} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)
 
