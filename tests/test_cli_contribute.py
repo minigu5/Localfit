@@ -1,0 +1,109 @@
+from typer.testing import CliRunner
+
+from omm import cli
+
+runner = CliRunner()
+
+
+class _FakeListener:
+    """Stands in for _EscListener: sets stop_event immediately so the real
+    loop body (already covered by test_contribute_loop.py) runs at most
+    zero/one iterations in these command-level tests."""
+
+    def __init__(self):
+        self.stop_event = cli.threading.Event()
+
+    def start(self):
+        self.stop_event.set()
+
+
+def test_declining_consent_cancels_before_any_other_check(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+    monkeypatch.setattr(
+        cli.benchmark,
+        "ollama_daemon_reachable",
+        lambda: (_ for _ in ()).throw(AssertionError("should not check daemon before consent")),
+    )
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "Cancelled" in result.stdout
+
+
+def test_requires_ollama_daemon(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: False)
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 1
+    assert "Ollama daemon" in result.stdout
+
+
+def test_requires_trained_recommendation_model(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli.predictor, "load_model_with_change_note", lambda url: (None, False))
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 1
+    assert "No trained recommendation model" in result.stdout
+
+
+def test_happy_path_runs_loop_cleans_up_and_prints_summary(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(
+        cli.predictor,
+        "load_model_with_change_note",
+        lambda url: ({"trees": [{}], "candidates": [{"repo_id": "o", "filename": "m.gguf"}]}, False),
+    )
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "rank_candidates", lambda artifact, hw: [])
+    monkeypatch.setattr(cli.benchmark_history, "loaded_refs", lambda: set())
+    monkeypatch.setattr(cli, "_EscListener", _FakeListener)
+    monkeypatch.setattr(cli, "_telemetry_row_count", lambda endpoint: 100)
+
+    loop_calls = []
+
+    def fake_loop(queue, stop_event, refetch):
+        loop_calls.append(1)
+        return cli._ContributionStats(benchmarked=[("m", 12.5)], skipped_unfit=1, attempted_not_uploaded=0)
+
+    monkeypatch.setattr(cli, "_run_contribution_loop", fake_loop)
+    autoremove_calls = []
+    monkeypatch.setattr(cli, "autoremove", lambda: autoremove_calls.append(1))
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 0, result.stdout
+    assert loop_calls == [1]
+    assert autoremove_calls == [1]
+    assert "session summary" in result.stdout.lower()
+    assert "m" in result.stdout and "12.5" in result.stdout
+    assert "100 -> 100" in result.stdout
+
+
+def test_telemetry_row_count_returns_none_on_network_error(monkeypatch):
+    monkeypatch.setattr(
+        cli.requests,
+        "get",
+        lambda *a, **k: (_ for _ in ()).throw(cli.requests.RequestException("boom")),
+    )
+
+    assert cli._telemetry_row_count("https://example.com/telemetry.json") is None
+
+
+def test_telemetry_row_count_counts_dict_entries(monkeypatch):
+    class _FakeResp:
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return {"a": {}, "b": {}, "c": {}}
+
+    monkeypatch.setattr(cli.requests, "get", lambda *a, **k: _FakeResp())
+
+    assert cli._telemetry_row_count("https://example.com/telemetry.json") == 3

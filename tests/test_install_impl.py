@@ -1,0 +1,109 @@
+import threading
+import time
+
+import pytest
+
+from omm import cli
+from omm.downloader import DownloadCancelled
+from omm.hub import ResolvedModel
+
+
+def _resolved(filename="tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"):
+    return ResolvedModel(url="https://example.com/x.gguf", filename=filename, repo_id="org/repo")
+
+
+def _stub_common(monkeypatch, ollama=True, lmstudio=False):
+    monkeypatch.setattr(cli, "sha256_file", lambda dest: "deadbeef")
+    monkeypatch.setattr(cli.linker, "is_lmstudio_installed", lambda: lmstudio)
+    monkeypatch.setattr(cli.linker, "is_ollama_installed", lambda: ollama)
+    monkeypatch.setattr(cli.linker, "link_ollama", lambda dest, tag: ollama)
+    monkeypatch.setattr(cli.linker, "sanitize_ollama_tag", lambda filename: "tinyllama")
+
+
+def test_skip_unfit_returns_outcome_without_prompting_or_downloading(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: {"trees": [{}]})
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "predict_speed", lambda trees, hw, candidate: 0.0)
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    download_calls = []
+    monkeypatch.setattr(cli, "download_file", lambda *a, **k: download_calls.append(a))
+
+    outcome = cli._install_impl(_resolved(), skip_unfit=True)
+
+    assert outcome.skipped_unfit is True
+    assert outcome.linked == {}
+    assert download_calls == []
+
+
+def test_auto_benchmark_skips_confirm_prompt_and_sends_telemetry(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+    monkeypatch.setattr(cli, "download_file", lambda url, dest: dest.write_bytes(b"x"))
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 55.0)
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: True)
+
+    outcome = cli._install_impl(_resolved(), auto_benchmark=True)
+
+    assert outcome.tokens_per_sec == 55.0
+    assert outcome.telemetry_sent is True
+
+
+def test_stop_event_set_before_download_raises_contribution_stopped(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+
+    def fake_download(url, dest, stop_check=None):
+        assert stop_check is not None
+        raise DownloadCancelled("interrupted")
+
+    monkeypatch.setattr(cli, "download_file", fake_download)
+    stop_event = threading.Event()
+    stop_event.set()
+
+    with pytest.raises(cli.ContributionStopped) as exc_info:
+        cli._install_impl(_resolved(), stop_event=stop_event)
+
+    assert exc_info.value.filename == "tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf"
+
+
+def test_stop_event_set_during_benchmark_raises_contribution_stopped(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+    monkeypatch.setattr(
+        cli, "download_file", lambda url, dest, stop_check=None: dest.write_bytes(b"x")
+    )
+    _stub_common(monkeypatch)
+
+    def slow_benchmark(tag):
+        time.sleep(2)
+        return 10.0
+
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", slow_benchmark)
+    stop_event = threading.Event()
+    threading.Timer(0.05, stop_event.set).start()
+
+    with pytest.raises(cli.ContributionStopped):
+        cli._install_impl(_resolved(), auto_benchmark=True, stop_event=stop_event)
+
+
+def test_plain_install_path_unaffected_by_stop_event_none(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+    calls = []
+
+    def fake_download(url, dest):
+        calls.append("no-kwargs")
+        dest.write_bytes(b"x")
+
+    monkeypatch.setattr(cli, "download_file", fake_download)
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 10.0)
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: True)
+
+    outcome = cli._install_impl(_resolved())
+
+    assert calls == ["no-kwargs"]
+    assert outcome.tokens_per_sec == 10.0

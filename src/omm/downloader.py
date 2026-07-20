@@ -1,8 +1,21 @@
-"""Resumable file downloads with a Rich progress bar."""
+"""Resumable file downloads with a Rich progress bar.
+
+Fresh, range-capable downloads above `_MIN_PARALLEL_TOTAL` are split across
+multiple concurrent HTTP connections (`_download_parallel`) to cut wall-clock
+time on fast links where a single TCP stream doesn't saturate bandwidth.
+Everything else - small files, servers that ignore Range, and resuming an
+existing `.part` file from a prior run - goes through the original
+single-stream path (`_download_single_stream`), which is also what makes a
+resume after an interrupted parallel download simple and safe: it just
+finishes the file over one connection rather than re-planning ranges.
+"""
 
 from __future__ import annotations
 
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Callable
 
 import requests
 from rich.progress import (
@@ -15,16 +28,149 @@ from rich.progress import (
 )
 
 _CHUNK_SIZE = 1024 * 1024
+_DEFAULT_THREADS = 4
+_MIN_CHUNK_SIZE = 8 * 1024 * 1024  # minimum work per thread
+_MIN_PARALLEL_TOTAL = 20 * 1024 * 1024  # below this, not worth parallelizing
 
 
 class DownloadError(Exception):
     pass
 
 
-def download_file(url: str, dest: Path) -> None:
-    """Download `url` to `dest`, resuming from a partial .part file if present."""
+class DownloadCancelled(DownloadError):
+    pass
+
+
+def _progress() -> Progress:
+    return Progress(
+        TextColumn("[cyan]{task.fields[filename]}"),
+        BarColumn(),
+        DownloadColumn(),
+        TransferSpeedColumn(),
+        TimeRemainingColumn(),
+    )
+
+
+def _choose_thread_count(total_size: int, max_threads: int = _DEFAULT_THREADS) -> int:
+    if total_size < _MIN_PARALLEL_TOTAL:
+        return 1
+    return max(1, min(max_threads, total_size // _MIN_CHUNK_SIZE))
+
+
+def _plan_ranges(total_size: int, num_threads: int) -> list[tuple[int, int]]:
+    """Split `[0, total_size)` into `num_threads` contiguous, non-overlapping
+    inclusive byte ranges."""
+    if num_threads <= 1:
+        return [(0, total_size - 1)]
+    base = total_size // num_threads
+    ranges = []
+    start = 0
+    for i in range(num_threads):
+        end = total_size - 1 if i == num_threads - 1 else start + base - 1
+        ranges.append((start, end))
+        start = end + 1
+    return ranges
+
+
+def _probe_range_support(url: str) -> tuple[int, bool]:
+    """Probe with a 1-byte Range request. Returns (total_size, supports_ranges).
+    A 206 with a parseable `Content-Range` means the server (and by
+    extension its CDN) honors Range requests, so a full download can be
+    safely split across threads."""
+    try:
+        resp = requests.get(url, headers={"Range": "bytes=0-0"}, stream=True, timeout=30)
+    except requests.RequestException:
+        return 0, False
+    resp.close()
+    if resp.status_code == 206:
+        content_range = resp.headers.get("Content-Range", "")
+        try:
+            total = int(content_range.rsplit("/", 1)[-1])
+        except (ValueError, IndexError):
+            return 0, False
+        return total, total > 0
+    return 0, False
+
+
+def _download_range_worker(
+    url: str,
+    part_path: Path,
+    start: int,
+    end: int,
+    progress: Progress,
+    task_id,
+    lock: threading.Lock,
+    errors: list[Exception],
+    stop_check: Callable[[], bool] | None,
+) -> None:
+    try:
+        resp = requests.get(url, headers={"Range": f"bytes={start}-{end}"}, stream=True, timeout=30)
+        if resp.status_code != 206:
+            raise DownloadError(f"Expected 206 for a range request, got {resp.status_code}")
+        with part_path.open("r+b") as f:
+            f.seek(start)
+            for chunk in resp.iter_content(chunk_size=_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                f.write(chunk)
+                with lock:
+                    progress.update(task_id, advance=len(chunk))
+                if stop_check is not None and stop_check():
+                    raise DownloadCancelled("interrupted by user")
+    except Exception as e:  # noqa: BLE001 - collected and re-raised by the caller
+        errors.append(e)
+
+
+def _download_parallel(
+    url: str,
+    dest: Path,
+    part_path: Path,
+    total_size: int,
+    thread_count: int,
+    stop_check: Callable[[], bool] | None,
+) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
-    part_path = dest.with_suffix(dest.suffix + ".part")
+    with part_path.open("wb") as f:
+        f.truncate(total_size)
+
+    ranges = _plan_ranges(total_size, thread_count)
+    lock = threading.Lock()
+    errors: list[Exception] = []
+
+    with _progress() as progress:
+        task_id = progress.add_task("download", total=total_size, completed=0, filename=dest.name)
+        with ThreadPoolExecutor(max_workers=thread_count) as executor:
+            futures = [
+                executor.submit(
+                    _download_range_worker,
+                    url,
+                    part_path,
+                    start,
+                    end,
+                    progress,
+                    task_id,
+                    lock,
+                    errors,
+                    stop_check,
+                )
+                for start, end in ranges
+            ]
+            for future in futures:
+                future.result()
+
+    if errors:
+        cancelled = next((e for e in errors if isinstance(e, DownloadCancelled)), None)
+        if cancelled is not None:
+            raise cancelled
+        raise DownloadError(str(errors[0])) from errors[0]
+
+    part_path.rename(dest)
+
+
+def _download_single_stream(
+    url: str, dest: Path, part_path: Path, stop_check: Callable[[], bool] | None
+) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
     resume_pos = part_path.stat().st_size if part_path.exists() else 0
 
     headers = {"Range": f"bytes={resume_pos}-"} if resume_pos else {}
@@ -46,18 +192,45 @@ def download_file(url: str, dest: Path) -> None:
 
     total = int(resp.headers.get("Content-Length", 0)) + resume_pos
 
-    with Progress(
-        TextColumn("[cyan]{task.fields[filename]}"),
-        BarColumn(),
-        DownloadColumn(),
-        TransferSpeedColumn(),
-        TimeRemainingColumn(),
-    ) as progress:
+    with _progress() as progress:
         task = progress.add_task("download", total=total or None, completed=resume_pos, filename=dest.name)
         with part_path.open(mode) as f:
             for chunk in resp.iter_content(chunk_size=_CHUNK_SIZE):
                 if chunk:
                     f.write(chunk)
                     progress.update(task, advance=len(chunk))
+                if stop_check is not None and stop_check():
+                    raise DownloadCancelled("interrupted by user")
 
     part_path.rename(dest)
+
+
+def download_file(url: str, dest: Path, stop_check: Callable[[], bool] | None = None) -> None:
+    """Download `url` to `dest`.
+
+    A fresh, range-capable download above `_MIN_PARALLEL_TOTAL` bytes is
+    split across multiple threads for speed. Everything else - small files,
+    servers that ignore Range, and resuming an existing `.part` file from a
+    prior run (single- or multi-threaded feature version alike) - goes
+    through the single-stream path, which also handles resuming.
+
+    If `stop_check` is given, it's polled regularly during the transfer; a
+    truthy result raises `DownloadCancelled` and leaves the `.part` file in
+    place for a later resume (used by `omm contribute`'s Esc-to-stop)."""
+    part_path = dest.with_suffix(dest.suffix + ".part")
+
+    if not part_path.exists():
+        total_size, supports_ranges = _probe_range_support(url)
+        if supports_ranges and total_size >= _MIN_PARALLEL_TOTAL:
+            thread_count = _choose_thread_count(total_size)
+            if thread_count > 1:
+                try:
+                    _download_parallel(url, dest, part_path, total_size, thread_count, stop_check)
+                    return
+                except DownloadCancelled:
+                    raise
+                except DownloadError:
+                    part_path.unlink(missing_ok=True)
+                    # fall through to a clean single-stream retry
+
+    _download_single_stream(url, dest, part_path, stop_check)

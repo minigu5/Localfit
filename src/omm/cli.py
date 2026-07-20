@@ -4,6 +4,9 @@ import importlib.metadata
 import json
 import platform
 import subprocess
+import threading
+import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import questionary
@@ -21,16 +24,29 @@ from rich.progress import (
 )
 from rich.table import Table
 
-from omm import benchmark, linker, predictor, registry, rules as rules_mod, search as search_mod, session_cache, telemetry
+from omm import (
+    benchmark,
+    benchmark_history,
+    linker,
+    predictor,
+    registry,
+    rules as rules_mod,
+    search as search_mod,
+    session_cache,
+    telemetry,
+    version_check,
+)
+from omm import contribute as contribute_mod
 from omm.completion import complete_install_name, complete_remove_filename
 from omm.config import MODELS_DIR, load_config
-from omm.downloader import DownloadError, download_file
+from omm.downloader import DownloadCancelled, DownloadError, download_file
 from omm.hardware import scan_hardware
 from omm.hashutil import sha256_file
 from omm.hub import (
     HF_DOWNLOAD,
     AmbiguousModelError,
     ModelResolutionError,
+    ResolvedModel,
     rank_quant_variants,
     remote_file_sha256,
     resolve_model,
@@ -54,9 +70,15 @@ def _omm_version() -> str:
 
 @app.callback(invoke_without_command=True)
 def _root(ctx: typer.Context) -> None:
+    _maybe_start_update_check(ctx)
     if ctx.invoked_subcommand is None:
         console.print(f"omm {_omm_version()}")
         raise typer.Exit(0)
+    resent = telemetry.flush_pending()
+    if resent:
+        console.print(
+            f"[dim]Sent {resent} queued telemetry event(s) from a previous session.[/dim]"
+        )
 
 
 @app.command(name="help")
@@ -174,6 +196,45 @@ def _remote_head_commit(ref: str = "main") -> str | None:
     if result.returncode != 0 or not result.stdout.strip():
         return None
     return result.stdout.split()[0]
+
+
+def _cached_remote_head_commit(ref: str = "main") -> str | None:
+    return version_check.cached_remote_head(_remote_head_commit, ref)
+
+
+def _background_version_check(installed: str, done: threading.Event, result: dict) -> None:
+    try:
+        latest = _cached_remote_head_commit()
+        if latest and latest != installed:
+            result["latest"] = latest
+    except Exception:
+        pass  # never let a background check crash or hang the CLI
+    finally:
+        done.set()
+
+
+def _print_update_notice(done: threading.Event, result: dict) -> None:
+    if done.is_set() and result.get("latest"):
+        console.print("[yellow]Update available! Run: [bold]omm update[/bold][/yellow]")
+
+
+_SKIP_UPDATE_CHECK_SUBCOMMANDS = {"update", "help"}
+
+
+def _maybe_start_update_check(ctx: typer.Context) -> None:
+    if ctx.invoked_subcommand in _SKIP_UPDATE_CHECK_SUBCOMMANDS:
+        return
+    installed = _installed_commit()
+    if not installed:  # editable/dev install - nothing to compare against
+        return
+    done = threading.Event()
+    result: dict[str, str] = {}
+    threading.Thread(
+        target=_background_version_check,
+        args=(installed, done, result),
+        daemon=True,
+    ).start()
+    ctx.call_on_close(lambda: _print_update_notice(done, result))
 
 
 # pipx gives no byte-level install progress, but it does print a fixed,
@@ -417,26 +478,66 @@ def _link_model(dest, repo_id: str | None, ollama_tag: str) -> dict[str, bool]:
     return linked
 
 
-@app.command()
-def install(
-    model_name: str = typer.Argument(..., autocompletion=complete_install_name),
-) -> None:
-    """Download a model into the central hub and link it into installed engines."""
-    model_name = _resolve_ref(model_name)
-    try:
-        resolved = resolve_model(model_name)
-    except AmbiguousModelError as e:
-        chosen = _pick_quant_variant(e)
-        if chosen is None:
-            console.print("[yellow]Cancelled.[/yellow]")
-            raise typer.Exit(0)
-        install(f"{e.repo_id}:{chosen}")
-        return
-    except ModelResolutionError as e:
-        console.print(f"[red]{e}[/red]")
-        _print_install_suggestions(model_name)
-        raise typer.Exit(1) from e
+@dataclass
+class InstallOutcome:
+    filename: str
+    repo_id: str | None
+    linked: dict[str, bool]
+    ollama_tag: str | None = None
+    tokens_per_sec: float | None = None
+    telemetry_sent: bool = False
+    skipped_unfit: bool = False
+    sha256: str | None = None
 
+
+class ContributionStopped(Exception):
+    """Esc fired mid-download or mid-benchmark inside `_install_impl`
+    while running under `omm contribute`."""
+
+    def __init__(self, filename: str) -> None:
+        super().__init__(filename)
+        self.filename = filename
+
+
+class _Interrupted(Exception):
+    pass
+
+
+def _run_interruptible(fn, stop_event: threading.Event | None):
+    """Run `fn()`, but if `stop_event` fires while it's in flight, return
+    control (raising `_Interrupted`) instead of blocking until `fn`
+    finishes. With no `stop_event`, just calls `fn()` directly - no thread
+    pool overhead on the plain `omm install` path."""
+    if stop_event is None:
+        return fn()
+
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as _FuturesTimeoutError
+
+    pool = ThreadPoolExecutor(max_workers=1)
+    try:
+        future = pool.submit(fn)
+        while True:
+            if stop_event.is_set():
+                raise _Interrupted()
+            try:
+                return future.result(timeout=0.2)
+            except _FuturesTimeoutError:
+                continue
+    finally:
+        pool.shutdown(wait=False)
+
+
+def _install_impl(
+    resolved,
+    *,
+    auto_benchmark: bool = False,
+    skip_unfit: bool = False,
+    stop_event: threading.Event | None = None,
+) -> InstallOutcome:
+    """Core of `omm install`: download, link, register, optionally
+    benchmark+report telemetry. Shared by the plain `install` command and
+    `omm contribute`'s unattended loop via the kwargs above."""
     url, filename, repo_id = resolved.url, resolved.filename, resolved.repo_id
 
     artifact = predictor.load_cached_model()
@@ -448,6 +549,8 @@ def install(
             console.print(
                 f"[red]Warning: this hardware is predicted not to run {filename}.[/red]"
             )
+            if skip_unfit:
+                return InstallOutcome(filename, repo_id, linked={}, skipped_unfit=True)
             if not _ask_confirm("Install anyway?"):
                 console.print("[yellow]Cancelled.[/yellow]")
                 raise typer.Exit(0)
@@ -457,7 +560,12 @@ def install(
         console.print(f"[yellow]{filename} already downloaded, skipping fetch.[/yellow]")
     else:
         try:
-            download_file(url, dest)
+            if stop_event is not None:
+                download_file(url, dest, stop_check=stop_event.is_set)
+            else:
+                download_file(url, dest)
+        except DownloadCancelled as e:
+            raise ContributionStopped(filename) from e
         except DownloadError as e:
             console.print(f"[red]{e}[/red]")
             raise typer.Exit(1) from e
@@ -480,20 +588,61 @@ def install(
         linked=linked,
     )
 
+    tokens_per_sec = None
+    telemetry_sent = False
     if linked["ollama"]:
-        if _ask_confirm("Benchmark this model's speed and send the result to the server?"):
+        should_benchmark = auto_benchmark or _ask_confirm(
+            "Benchmark this model's speed and send the result to the server?"
+        )
+        if should_benchmark:
             console.print("Benchmarking...")
-            tokens_per_sec = benchmark.benchmark_ollama(ollama_tag)
+            try:
+                tokens_per_sec = _run_interruptible(
+                    lambda: benchmark.benchmark_ollama(ollama_tag), stop_event
+                )
+            except _Interrupted as e:
+                raise ContributionStopped(filename) from e
             if tokens_per_sec:
                 console.print(f"[cyan]{tokens_per_sec:.1f} tok/s[/cyan]")
-            _report_telemetry(filename, repo_id, tokens_per_sec)
+            telemetry_sent = _report_telemetry(filename, repo_id, tokens_per_sec)
+        else:
+            telemetry.log_attempt("declined_by_user", filename)
+    else:
+        telemetry.log_attempt("not_attempted_no_ollama_link", filename)
 
-    console.print(f"[green]Installed {filename}[/green]")
-    if linked["ollama"]:
-        console.print(f"  Ollama: [green]ollama run {ollama_tag}[/green]")
-    if linked["lmstudio"]:
+    return InstallOutcome(
+        filename, repo_id, linked, ollama_tag, tokens_per_sec, telemetry_sent, sha256=sha256
+    )
+
+
+@app.command()
+def install(
+    model_name: str = typer.Argument(..., autocompletion=complete_install_name),
+) -> None:
+    """Download a model into the central hub and link it into installed engines."""
+    model_name = _resolve_ref(model_name)
+    try:
+        resolved = resolve_model(model_name)
+    except AmbiguousModelError as e:
+        chosen = _pick_quant_variant(e)
+        if chosen is None:
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        install(f"{e.repo_id}:{chosen}")
+        return
+    except ModelResolutionError as e:
+        console.print(f"[red]{e}[/red]")
+        _print_install_suggestions(model_name)
+        raise typer.Exit(1) from e
+
+    outcome = _install_impl(resolved)
+
+    console.print(f"[green]Installed {outcome.filename}[/green]")
+    if outcome.linked.get("ollama"):
+        console.print(f"  Ollama: [green]ollama run {outcome.ollama_tag}[/green]")
+    if outcome.linked.get("lmstudio"):
         console.print("  LM Studio: visible in your local models list")
-    console.print(f"  Uninstall with: [cyan]omm uninstall {filename}[/cyan]")
+    console.print(f"  Uninstall with: [cyan]omm uninstall {outcome.filename}[/cyan]")
 
 
 def _cleanup_incomplete_install(filename: str) -> bool:
@@ -905,13 +1054,17 @@ def autoremove() -> None:
     )
 
 
-def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float | None) -> None:
+def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float | None) -> bool:
     if tokens_per_sec is None:
         # Ollama daemon wasn't reachable - not a real "it doesn't run" signal,
         # so skip rather than polluting the speed-regression training data.
-        return
+        telemetry.log_attempt("skipped_daemon_unreachable", filename)
+        console.print(
+            "[dim]Telemetry not sent - Ollama daemon wasn't reachable during benchmark.[/dim]"
+        )
+        return False
     info = scan_hardware()
-    telemetry.send_event(
+    sent = telemetry.send_event(
         {
             "os": info.os_name,
             "cpu": info.cpu,
@@ -926,6 +1079,206 @@ def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float 
         },
         force=True,
     )
+    if not sent:
+        console.print("[dim]Telemetry not sent (will retry next time you run omm).[/dim]")
+    return sent
+
+
+@dataclass
+class _ContributionStats:
+    benchmarked: list[tuple[str, float]]
+    skipped_unfit: int = 0
+    attempted_not_uploaded: int = 0
+
+
+def _telemetry_row_count(endpoint: str) -> int | None:
+    """Best-effort read of how many rows exist in the (read-open) Firebase
+    telemetry endpoint, for `omm contribute`'s before/after summary."""
+    try:
+        resp = requests.get(f"{endpoint}?shallow=true", timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        return len(data) if isinstance(data, dict) else 0
+    except (requests.RequestException, ValueError):
+        return None
+
+
+class _EscListener:
+    """Background key-listener so Esc can interrupt `omm contribute` even
+    mid-download/mid-benchmark, not just at a questionary prompt. No-ops
+    (Ctrl+C is still the fallback) when stdin isn't a real terminal - tests,
+    CI, and piped input all fall into this path, mirroring session_cache.py's
+    tty-detection idiom."""
+
+    def __init__(self) -> None:
+        self.stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        try:
+            import os
+
+            os.ttyname(0)
+        except OSError:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            import select
+
+            from prompt_toolkit.input import create_input
+
+            inp = create_input()
+            with inp.raw_mode():
+                while not self.stop_event.is_set():
+                    ready, _, _ = select.select([inp.fileno()], [], [], 0.1)
+                    if not ready:
+                        continue
+                    for key_press in inp.read_keys():
+                        if key_press.key == Keys.Escape:
+                            self.stop_event.set()
+        except Exception:
+            pass  # best-effort; Ctrl+C still works as a fallback
+
+
+def _run_contribution_loop(queue, stop_event: threading.Event, refetch) -> _ContributionStats:
+    stats = _ContributionStats(benchmarked=[])
+    while not stop_event.is_set():
+        candidate = queue.next_candidate(refetch=refetch)
+        if candidate is None:
+            console.print("[dim]No more candidates available for this hardware.[/dim]")
+            break
+
+        resolved = ResolvedModel(
+            url=HF_DOWNLOAD.format(repo_id=candidate["repo_id"], filename=candidate["filename"]),
+            filename=candidate["filename"],
+            repo_id=candidate["repo_id"],
+        )
+        display_name = candidate.get("name", candidate["filename"])
+        console.print(f"[cyan]Trying {display_name}...[/cyan]")
+
+        try:
+            outcome = _install_impl(
+                resolved, auto_benchmark=True, skip_unfit=True, stop_event=stop_event
+            )
+        except ContributionStopped as e:
+            _cleanup_incomplete_install(e.filename)
+            reg = registry.load_registry()
+            fn, entry = _lookup_entry(e.filename, reg)
+            if entry:
+                _remove_one(fn, entry)
+            break
+        except (DownloadError, linker.LinkError) as e:
+            console.print(f"[yellow]Skipping {candidate['filename']}: {e}[/yellow]")
+            continue
+
+        if outcome.skipped_unfit:
+            stats.skipped_unfit += 1
+            continue
+
+        reg = registry.load_registry()
+        fn, entry = _lookup_entry(outcome.filename, reg)
+        if entry:
+            _remove_one(fn, entry)
+
+        if outcome.tokens_per_sec is not None and outcome.telemetry_sent:
+            ref_str = contribute_mod.ref(candidate)
+            benchmark_history.record_benchmarked(
+                ref_str,
+                repo_id=outcome.repo_id,
+                filename=outcome.filename,
+                sha256=outcome.sha256 or "",
+                tokens_per_sec=outcome.tokens_per_sec,
+            )
+            queue.mark_seen(ref_str)
+            stats.benchmarked.append((display_name, outcome.tokens_per_sec))
+        else:
+            stats.attempted_not_uploaded += 1
+
+    return stats
+
+
+def _print_contribution_summary(
+    stats: _ContributionStats,
+    duration_seconds: float,
+    before_count: int | None,
+    after_count: int | None,
+) -> None:
+    minutes, seconds = divmod(int(duration_seconds), 60)
+    console.print("=" * 70)
+    console.print("[bold]omm contribute: session summary[/bold]")
+    console.print(f"Duration: {minutes}m {seconds}s")
+    console.print(f"Models benchmarked+uploaded: {len(stats.benchmarked)}")
+    for name, tokens_per_sec in stats.benchmarked:
+        console.print(f"  - {name:<40} {tokens_per_sec:.1f} tok/s")
+    console.print(f"Skipped (predicted not to fit this hardware): {stats.skipped_unfit}")
+    console.print(f"Attempted but not uploaded (kept for retry): {stats.attempted_not_uploaded}")
+    if before_count is not None and after_count is not None:
+        console.print(
+            f"Global telemetry dataset: {before_count} -> {after_count} rows "
+            f"({after_count - before_count:+d})"
+        )
+        console.print(
+            "  [dim](delta may include uploads from other contributors during this session)[/dim]"
+        )
+    console.print("=" * 70)
+
+
+@app.command()
+def contribute() -> None:
+    """Repeatedly install, benchmark, and upload telemetry for hardware-fit
+    models until Esc is pressed, to help grow the training dataset behind
+    `omm recommend`. Deletes each model after benchmarking it (even
+    successful ones) to keep disk usage bounded."""
+    console.print(
+        "[yellow]This will repeatedly download, benchmark, and delete GGUF models "
+        "until you press Esc. It uses real bandwidth, disk space, and compute, "
+        "and runs unattended (no per-model confirmation).[/yellow]"
+    )
+    if not _ask_confirm("Start contributing compute now?"):
+        console.print("[yellow]Cancelled.[/yellow]")
+        raise typer.Exit(0)
+
+    if not benchmark.ollama_daemon_reachable():
+        console.print(
+            "[red]omm contribute requires a running Ollama daemon - "
+            "it's the only benchmarkable engine right now.[/red]"
+        )
+        raise typer.Exit(1)
+
+    config = load_config()
+    artifact, _ = predictor.load_model_with_change_note(config.get("model_url"))
+    if not artifact or not artifact.get("candidates"):
+        console.print(
+            "[red]No trained recommendation model available - can't select candidates.[/red]"
+        )
+        raise typer.Exit(1)
+
+    endpoint = config.get("telemetry_endpoint")
+    before_count = _telemetry_row_count(endpoint) if endpoint else None
+
+    hw = scan_hardware()
+    history_refs = benchmark_history.loaded_refs()
+    queue = contribute_mod.ContributionQueue(artifact, hw, history_refs)
+
+    def refetch():
+        return predictor.load_model_with_change_note(config.get("model_url"))
+
+    listener = _EscListener()
+    listener.start()
+    start_time = time.monotonic()
+    try:
+        stats = _run_contribution_loop(queue, listener.stop_event, refetch)
+    finally:
+        listener.stop_event.set()
+
+    autoremove()
+
+    after_count = _telemetry_row_count(endpoint) if endpoint else None
+    duration = time.monotonic() - start_time
+    _print_contribution_summary(stats, duration, before_count, after_count)
 
 
 if __name__ == "__main__":
