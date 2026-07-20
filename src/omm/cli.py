@@ -904,7 +904,7 @@ def search(query: str) -> None:
         if c.get("repo_id") not in local_repo_ids
     ]
 
-    combined = local_matches + hf_matches
+    combined = search_mod.dedupe_by_base_repo(local_matches + hf_matches)
     if not combined:
         console.print(f"[yellow]No models found matching '{query}'.[/yellow]")
         raise typer.Exit(1)
@@ -917,10 +917,14 @@ def search(query: str) -> None:
 
     groups = search_mod.group_by_family(combined)
     refs: list[str] = []
+    seen_refs: set[str] = set()
     for family in sorted(groups):
         console.print(f"[bold cyan]==> {family}[/bold cyan]")
         for c in groups[family]:
             ref = search_mod.install_ref(c)
+            if ref in seen_refs:
+                continue
+            seen_refs.add(ref)
             refs.append(ref)
             desc = c.get("description") or ""
             if trees is not None and predictor.predict_speed(trees, hw, c) <= 0:
@@ -935,7 +939,7 @@ def search(query: str) -> None:
 def _print_install_suggestions(query: str) -> None:
     config = load_config()
     pool = search_mod.local_candidate_pool(config.get("model_url"))
-    suggestions = search_mod.suggest_similar(query, pool, limit=3)
+    suggestions = search_mod.dedupe_by_base_repo(search_mod.suggest_similar(query, pool, limit=3))
 
     existing_labels = {s.get("name") or s.get("repo_id") for s in suggestions}
     if len(suggestions) < 3:

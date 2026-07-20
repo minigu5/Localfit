@@ -83,17 +83,51 @@ def pick_gguf_file(siblings: list[dict]) -> str | None:
 def install_ref(candidate: dict) -> str:
     """The string a user can actually pass to `omm install`, as opposed to
     the human-readable label. A curated short name only resolves if it's a
-    literal CURATED_INDEX key; everything else (cached candidates, live HF
-    results) needs the unambiguous 'repo_id:filename' form.
+    literal CURATED_INDEX key. Everything else is left as a bare 'org/repo'
+    - repos almost always ship several quants under one name, and `omm
+    install org/repo` already walks the user through picking one (see
+    hub.AmbiguousModelError), so there's no need to hardcode a filename here
+    and print what looks like a distinct result per quant.
     """
     name = candidate.get("name")
     if name and name in hub.CURATED_INDEX:
         return name
-    repo_id = candidate.get("repo_id")
-    filename = candidate.get("filename")
-    if repo_id and filename:
-        return f"{repo_id}:{filename}"
-    return repo_id or name or ""
+    return candidate.get("repo_id") or name or ""
+
+
+# Matches a quant token as its own hyphen-delimited path segment (e.g. the
+# "-Q4_K_M" in ".../Model-Q4_K_M-GGUF"). Many uploaders publish one repo per
+# quant level instead of one repo with several files, so without this,
+# quant-in-repo-name uploads (e.g. 9 "roleplaiapp/Model-Q4_0-GGUF",
+# "...-Q5_K_M-GGUF", ...) show up as 9 unrelated search results.
+_QUANT_TOKEN_RE = re.compile(
+    r"-(?:IQ[1-4]_(?:XXS|XS|S|M|NL)|Q[2-8](?:_[01])?(?:_K(?:_[SML])?)?|BF16|FP16|FP32|F16|F32)"
+    r"(?=-|$)",
+    re.IGNORECASE,
+)
+
+
+def _base_repo_key(repo_id: str) -> str:
+    """Normalize a repo id by stripping an embedded quant token, so
+    per-quant repos from the same uploader collapse to one dedupe key."""
+    return _QUANT_TOKEN_RE.sub("", repo_id).lower()
+
+
+def dedupe_by_base_repo(candidates: list[dict]) -> list[dict]:
+    """Collapse candidates that are really the same base model - either the
+    exact same repo, or per-quant sibling repos from the same uploader
+    (quant baked into the repo name rather than the filename) - down to one
+    representative each, first-seen order preserved."""
+    seen: set[str] = set()
+    deduped: list[dict] = []
+    for c in candidates:
+        repo_id = c.get("repo_id")
+        key = _base_repo_key(repo_id) if repo_id else _label(c).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(c)
+    return deduped
 
 
 def guess_family(text: str) -> str:

@@ -163,21 +163,21 @@ def test_install_ref_uses_short_name_for_curated_models():
     assert search_mod.install_ref(candidate) == "tinyllama-1.1b-q4"
 
 
-def test_install_ref_uses_repo_and_filename_for_non_curated_candidates():
+def test_install_ref_uses_bare_repo_id_for_non_curated_candidates():
     # Regression: cached-candidate "name" is a sanitized ollama tag
     # (e.g. from scripts/fetch_hf_candidates.py), never a valid
     # `omm install` argument on its own - it has no "/" and isn't a
-    # curated key, so resolve_model() rejects it outright.
+    # curated key, so resolve_model() rejects it outright. And the
+    # filename is dropped: repos ship several quants under one name,
+    # `omm install org/repo` already prompts for a quant, so printing a
+    # hardcoded filename just makes one repo look like several results.
     candidate = {
         "name": "ibm-granite-granite-4-1-3b-gguf",
         "repo_id": "ibm-granite/granite-4.1-3b-GGUF",
         "filename": "granite-4.1-3b-Q4_K_M.gguf",
     }
 
-    assert (
-        search_mod.install_ref(candidate)
-        == "ibm-granite/granite-4.1-3b-GGUF:granite-4.1-3b-Q4_K_M.gguf"
-    )
+    assert search_mod.install_ref(candidate) == "ibm-granite/granite-4.1-3b-GGUF"
 
 
 def test_install_ref_falls_back_to_repo_id_when_filename_missing():
