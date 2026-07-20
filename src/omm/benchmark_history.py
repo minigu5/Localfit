@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from omm import config
+from omm.atomic import atomic_write_text, locked
 
 
 def _path() -> Path:
@@ -34,7 +35,7 @@ def _save(data: dict[str, Any]) -> None:
     try:
         path = _path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data))
+        atomic_write_text(path, json.dumps(data))
     except OSError:
         pass
 
@@ -50,12 +51,14 @@ def has_been_benchmarked(ref: str) -> bool:
 def record_benchmarked(
     ref: str, *, repo_id: str | None, filename: str, sha256: str, tokens_per_sec: float
 ) -> None:
-    data = _load()
-    data["entries"][ref] = {
-        "repo_id": repo_id,
-        "filename": filename,
-        "sha256": sha256,
-        "tokens_per_sec": tokens_per_sec,
-        "benchmarked_at": datetime.now(timezone.utc).isoformat(),
-    }
-    _save(data)
+    path = _path()
+    with locked(path):
+        data = _load()
+        data["entries"][ref] = {
+            "repo_id": repo_id,
+            "filename": filename,
+            "sha256": sha256,
+            "tokens_per_sec": tokens_per_sec,
+            "benchmarked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        _save(data)

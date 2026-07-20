@@ -1,6 +1,6 @@
 import json
 
-from omm import telemetry
+from omm import config, telemetry
 
 
 class _FakeResp:
@@ -126,6 +126,7 @@ def test_flush_pending_returns_zero_when_empty(isolated_omm_home):
 
 
 def test_flush_pending_resends_and_clears_on_success(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_endpoint="https://example.com")
     (isolated_omm_home / "telemetry_pending.json").write_text(
         json.dumps([{"model": "a"}, {"model": "b"}])
     )
@@ -138,6 +139,7 @@ def test_flush_pending_resends_and_clears_on_success(isolated_omm_home, monkeypa
 
 
 def test_flush_pending_keeps_events_that_still_fail(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_endpoint="https://example.com")
     (isolated_omm_home / "telemetry_pending.json").write_text(json.dumps([{"model": "a"}]))
     monkeypatch.setattr(telemetry.requests, "post", lambda *a, **k: _FakeResp(500))
 
@@ -148,6 +150,7 @@ def test_flush_pending_keeps_events_that_still_fail(isolated_omm_home, monkeypat
 
 
 def test_flush_pending_caps_attempts_per_call(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_endpoint="https://example.com")
     events = [{"model": str(i)} for i in range(5)]
     (isolated_omm_home / "telemetry_pending.json").write_text(json.dumps(events))
     calls = []

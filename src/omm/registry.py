@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from omm.atomic import atomic_write_text, backup_corrupt_file, locked
 from omm.config import REGISTRY_PATH, ensure_omm_home
 
 
@@ -12,24 +13,41 @@ def load_registry() -> dict[str, Any]:
     ensure_omm_home()
     if not REGISTRY_PATH.exists():
         return {}
-    return json.loads(REGISTRY_PATH.read_text())
+    try:
+        data = json.loads(REGISTRY_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        backup_corrupt_file(REGISTRY_PATH)
+        return {}
+    if not isinstance(data, dict):
+        backup_corrupt_file(REGISTRY_PATH)
+        return {}
+    return data
 
 
 def save_registry(registry: dict[str, Any]) -> None:
     ensure_omm_home()
-    REGISTRY_PATH.write_text(json.dumps(registry, indent=2))
+    with locked(REGISTRY_PATH):
+        _save_registry_unlocked(registry)
+
+
+def _save_registry_unlocked(registry: dict[str, Any]) -> None:
+    atomic_write_text(REGISTRY_PATH, json.dumps(registry, indent=2) + "\n")
 
 
 def upsert_entry(filename: str, **fields: Any) -> None:
-    registry = load_registry()
-    entry = registry.setdefault(filename, {"linked": {}})
-    entry.update({k: v for k, v in fields.items() if k != "linked"})
-    if "linked" in fields:
-        entry["linked"].update(fields["linked"])
-    save_registry(registry)
+    ensure_omm_home()
+    with locked(REGISTRY_PATH):
+        registry = load_registry()
+        entry = registry.setdefault(filename, {"linked": {}})
+        entry.update({k: v for k, v in fields.items() if k != "linked"})
+        if "linked" in fields:
+            entry["linked"].update(fields["linked"])
+        _save_registry_unlocked(registry)
 
 
 def remove_entry(filename: str) -> None:
-    registry = load_registry()
-    registry.pop(filename, None)
-    save_registry(registry)
+    ensure_omm_home()
+    with locked(REGISTRY_PATH):
+        registry = load_registry()
+        registry.pop(filename, None)
+        _save_registry_unlocked(registry)

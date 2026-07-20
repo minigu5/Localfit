@@ -9,6 +9,7 @@ Accepts three forms for `omm install <model_name>`:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from urllib.parse import quote
 
 import requests
 
@@ -149,6 +150,24 @@ def remote_file_sha256(repo_id: str, filename: str) -> str | None:
     if not entries:
         return None
     return entries[0].get("lfs", {}).get("sha256")
+
+
+def remote_file_size(repo_id: str, filename: str) -> int | None:
+    """Best-effort Hub file size without downloading the GGUF."""
+    url = HF_DOWNLOAD.format(repo_id=repo_id, filename=quote(filename, safe="/"))
+    try:
+        response = requests.head(url, timeout=15, allow_redirects=False)
+        response.raise_for_status()
+    except requests.RequestException:
+        return None
+    raw_size = response.headers.get("X-Linked-Size")
+    if raw_size is None and response.status_code == 200:
+        raw_size = response.headers.get("Content-Length")
+    try:
+        size = int(raw_size)
+    except (TypeError, ValueError):
+        return None
+    return size if size > 0 else None
 
 
 def resolve_model(model_name: str) -> ResolvedModel:

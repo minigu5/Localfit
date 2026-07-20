@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from omm import cli
+from omm import cli, config
 
 runner = CliRunner()
 
@@ -53,6 +53,7 @@ def test_requires_trained_recommendation_model(isolated_omm_home, monkeypatch):
 
 
 def test_happy_path_runs_loop_cleans_up_and_prints_summary(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_endpoint="https://example.com/telemetry.json")
     monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
     monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
     monkeypatch.setattr(

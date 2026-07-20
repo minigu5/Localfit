@@ -17,6 +17,7 @@ An ensemble is a list of trees; the prediction is their plain average
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
@@ -31,3 +32,21 @@ def predict_ensemble(trees: list[dict[str, Any]], features: list[float]) -> floa
     if not trees:
         raise ValueError("empty ensemble")
     return sum(predict_tree(tree, features) for tree in trees) / len(trees)
+
+
+def predict_ensemble_range(
+    trees: list[dict[str, Any]], features: list[float]
+) -> tuple[float, float, float]:
+    """Return mean plus the 10th/90th tree prediction spread.
+
+    This is an estimator-disagreement range, not a statistical confidence
+    interval. It is still more honest than presenting a sparse bootstrap
+    prediction as one exact decimal value.
+    """
+    if not trees:
+        raise ValueError("empty ensemble")
+    values = sorted(max(0.0, float(predict_tree(tree, features))) for tree in trees)
+    mean = sum(values) / len(values)
+    low = values[int((len(values) - 1) * 0.1)]
+    high = values[math.ceil((len(values) - 1) * 0.9)]
+    return mean, low, high

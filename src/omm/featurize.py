@@ -8,9 +8,9 @@ from __future__ import annotations
 import re
 
 # Order matters: this is the exact input vector the trained tree expects.
-# cpu/gpu_score+tier were appended after the original 5 - appending (not
-# inserting) keeps old cached model.json artifacts scorable, since their
-# trees only ever reference feature indices 0-4.
+# New features are only appended.  Never insert or reorder entries: cached
+# artifacts contain integer feature indexes, so preserving the original
+# prefix keeps every older model scorable.
 FEATURE_ORDER = [
     "ram_gb",
     "vram_gb",
@@ -21,14 +21,25 @@ FEATURE_ORDER = [
     "cpu_tier",
     "gpu_score",
     "gpu_tier",
+    "model_size_gb",
+    "gpu_tflops",
+    "context_length",
+    "gpu_offload_ratio",
+    "cpu_threads",
+    "num_batch",
+    "active_param_count_b",
+    "engine_llamacpp",
+    "engine_lmstudio",
 ]
 
 _QUANT_BITS = {
+    "Q1": 1.0,
     "Q2": 2.0,
     "Q3": 3.0,
     "Q4": 4.0,
     "Q5": 5.0,
     "Q6": 6.0,
+    "Q7": 7.0,
     "Q8": 8.0,
     "F16": 16.0,
     "FP16": 16.0,
@@ -55,15 +66,107 @@ _CHIP_MODEL_RE = re.compile(
 
 
 def parse_param_count_billions(text: str) -> float | None:
-    m = re.search(r"(\d+(?:\.\d+)?)[Bb](?:[-_.]|$)", text)
-    return float(m.group(1)) if m else None
+    # Strip repository-owner tokens because authors such as ``hauser458b``
+    # look like parameter counts. Within a model filename prefer a B-unit
+    # match over a later M-unit context-window token (for example the ``1M``
+    # in ``Qwen2.5-7B-Instruct-1M``).
+    without_owners = re.sub(r"(?:(?<=^)|(?<=\s))[A-Za-z0-9._-]+(?=/)", "", text)
+    matches = list(
+        re.finditer(
+            r"(?<![A-Za-z0-9])(\d+(?:[._]\d+)?)([BbMm])(?=[-_.]|$)",
+            without_owners,
+        )
+    )
+    if not matches:
+        return None
+    billion_matches = [match for match in matches if match.group(2).lower() == "b"]
+    m = (billion_matches or matches)[-1]
+    value = float(m.group(1).replace("_", "."))
+    return value / 1000.0 if m.group(2).lower() == "m" else value
+
+
+def candidate_parameter_count_billions(candidate: dict) -> float | None:
+    """Prefer filename metadata, then the repository name, then display name."""
+    sources = [str(candidate.get("filename") or "")]
+    repo_id = str(candidate.get("repo_id") or "")
+    if repo_id:
+        sources.append(repo_id.rsplit("/", 1)[-1])
+    sources.append(str(candidate.get("name") or ""))
+    for source in sources:
+        parsed = parse_param_count_billions(source)
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def parse_active_param_count_billions(text: str) -> float | None:
+    """Parse MoE active parameters from names such as ``35B-A3B``."""
+    matches = re.findall(
+        r"(?:^|[-_.])A(\d+(?:[._]\d+)?)[Bb](?=[-_.]|$)",
+        text,
+        re.IGNORECASE,
+    )
+    if not matches:
+        return None
+    return float(matches[-1].replace("_", "."))
+
+
+def candidate_active_parameter_count_billions(candidate: dict) -> float | None:
+    sources = [str(candidate.get("filename") or "")]
+    repo_id = str(candidate.get("repo_id") or "")
+    if repo_id:
+        sources.append(repo_id.rsplit("/", 1)[-1])
+    sources.append(str(candidate.get("name") or ""))
+    for source in sources:
+        parsed = parse_active_param_count_billions(source)
+        if parsed is not None:
+            return parsed
+    return candidate_parameter_count_billions(candidate)
 
 
 def parse_quant_bits(text: str) -> float | None:
-    m = re.search(r"(FP?32|FP?16|Q\d)", text.upper().replace("_", ""))
-    if not m:
+    # Prefer an explicit GGUF Q/IQ token over source or auxiliary precision.
+    # This handles both ``BF16.Q4_K_M`` and ``Q4_K_M-fp16``. Requiring a
+    # delimiter after the digit avoids treating an auxiliary ``Q8nextn``
+    # suffix as the main quantization.
+    upper = text.upper()
+    quantized = re.findall(r"I?(Q[1-8])(?=[-_.]|$|XS|NL)", upper)
+    if quantized:
+        return _QUANT_BITS.get(quantized[-1])
+    compact_float = re.findall(r"(?:MX|NV)FP([1-8])(?=[-_.]|$)", upper)
+    if compact_float:
+        return float(compact_float[-1])
+    integer_quant = re.findall(r"(?:^|[-_.])I([1-8])(?=[-_.]|$)", upper)
+    if integer_quant:
+        return float(integer_quant[-1])
+    bit_labels = re.findall(r"([1-8])[-_]?BIT(?=[-_.]|$)", upper)
+    if bit_labels:
+        return float(bit_labels[-1])
+    precision = re.findall(r"(BF16|FP16|F16|FP32|F32)(?=[-_.]|$)", upper)
+    if not precision:
         return None
-    return _QUANT_BITS.get(m.group(1))
+    return 16.0 if precision[-1].endswith("16") else 32.0
+
+
+def candidate_quant_bits(candidate: dict) -> float | None:
+    """Read an explicit quantization or infer effective stored bits from size."""
+    sources = [str(candidate.get("filename") or "")]
+    repo_id = str(candidate.get("repo_id") or "")
+    if repo_id:
+        sources.append(repo_id.rsplit("/", 1)[-1])
+    sources.append(str(candidate.get("name") or ""))
+    for source in sources:
+        parsed = parse_quant_bits(source)
+        if parsed is not None:
+            return parsed
+
+    parameters = candidate_parameter_count_billions(candidate)
+    size_bytes = candidate.get("size_bytes")
+    if parameters and isinstance(size_bytes, (int, float)) and size_bytes > 0:
+        effective_bits = float(size_bytes) * 8 / (parameters * 1_000_000_000)
+        if 0.5 <= effective_bits <= 32:
+            return round(effective_bits, 2)
+    return None
 
 
 def parse_chip_score(text: str) -> tuple[float, float]:
@@ -77,6 +180,23 @@ def parse_chip_score(text: str) -> tuple[float, float]:
     return score, tier
 
 
+def estimate_model_size_gb(text: str, size_bytes: int | float | None = None) -> float | None:
+    """Return the GGUF file size in GiB, preferring Hub metadata.
+
+    The parameter/quantization fallback is intentionally conservative: GGUF
+    files contain metadata and tensors that are not captured by the simple
+    ``parameters * bits`` calculation.
+    """
+    if isinstance(size_bytes, (int, float)) and size_bytes > 0:
+        return float(size_bytes) / (1024**3)
+
+    param_count_b = parse_param_count_billions(text)
+    quant_bits = parse_quant_bits(text)
+    if param_count_b is None or quant_bits is None:
+        return None
+    return param_count_b * quant_bits / 8.0 * 1.1
+
+
 def build_features(
     ram_gb: float,
     vram_gb: float | None,
@@ -87,6 +207,14 @@ def build_features(
     cpu_tier: float = 0.0,
     gpu_score: float = 0.0,
     gpu_tier: float = 0.0,
+    model_size_gb: float = 0.0,
+    gpu_tflops: float = 0.0,
+    context_length: float = 0.0,
+    gpu_offload_ratio: float = 0.0,
+    cpu_threads: float = 0.0,
+    num_batch: float = 0.0,
+    active_param_count_b: float | None = None,
+    engine: str = "ollama",
 ) -> list[float]:
     """Fixed-order numeric feature vector matching FEATURE_ORDER, with
     missing values defaulted to 0.0 (the tree learns around this)."""
@@ -100,4 +228,19 @@ def build_features(
         cpu_tier,
         gpu_score,
         gpu_tier,
+        model_size_gb,
+        gpu_tflops,
+        context_length,
+        gpu_offload_ratio,
+        cpu_threads,
+        num_batch,
+        (
+            active_param_count_b
+            if active_param_count_b is not None
+            else param_count_b
+            if param_count_b is not None
+            else 0.0
+        ),
+        1.0 if engine == "llama.cpp" else 0.0,
+        1.0 if engine == "lmstudio" else 0.0,
     ]
