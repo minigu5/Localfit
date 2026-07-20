@@ -54,3 +54,10 @@ def cached_remote_head(
     latest = fetch(ref)
     _save({"checked_at": time.time(), "remote_head": latest})
     return latest
+
+
+def record(remote_head: str | None) -> None:
+    """Overwrite the cache with a freshly-known remote head (e.g. right
+    after `omm update` fetches it live), so the next background check
+    doesn't serve a pre-update reading for up to `_TTL_SECONDS`."""
+    _save({"checked_at": time.time(), "remote_head": remote_head})

@@ -272,6 +272,8 @@ def update() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
     installed = _installed_commit()
     latest = _remote_head_commit() if installed else None
+    if latest:
+        version_check.record(latest)
     if installed and latest and installed == latest:
         console.print(f"[green]omm is already up to date ({installed[:7]}).[/green]")
         _refresh_data()

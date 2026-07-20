@@ -101,6 +101,26 @@ def test_update_skips_reinstall_when_already_up_to_date(monkeypatch):
     assert refresh_calls == [1]
 
 
+def test_update_refreshes_stale_cache_with_live_remote_head(monkeypatch):
+    """A background check that ran before this `update` populated
+    update_check.json with a now-outdated remote head. update() fetches
+    the remote head live - it must write that fresh value back into the
+    cache, or the next command's background check keeps serving the
+    stale pre-update reading (false "Update available") until the TTL
+    expires."""
+    same_commit = "abc1234" * 5 + "abc12345"
+    monkeypatch.setattr(cli, "_installed_commit", lambda: same_commit)
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda: same_commit)
+    monkeypatch.setattr(cli, "_refresh_data", lambda: None)
+    recorded = []
+    monkeypatch.setattr(cli.version_check, "record", lambda head: recorded.append(head))
+
+    result = runner.invoke(cli.app, ["update"])
+
+    assert result.exit_code == 0, result.stdout
+    assert recorded == [same_commit]
+
+
 def test_update_reinstalls_when_installed_commit_differs_from_remote(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
     monkeypatch.setattr(cli, "_installed_commit", lambda: "old" * 13 + "old")
