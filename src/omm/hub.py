@@ -45,9 +45,10 @@ class AmbiguousModelError(ModelResolutionError):
     so the caller can offer a quantization-level choice instead of just
     failing (see `rank_quant_variants`)."""
 
-    def __init__(self, repo_id: str, candidates: list[str]):
+    def __init__(self, repo_id: str, candidates: list[str], param_count_b: float | None = None):
         self.repo_id = repo_id
         self.candidates = candidates
+        self.param_count_b = param_count_b
         super().__init__(
             f"Repo '{repo_id}' has multiple .gguf files, specify one: "
             f"{repo_id}:<filename>\nOptions: {', '.join(candidates)}"
@@ -72,13 +73,22 @@ class QuantVariant:
 _RAM_OVERHEAD_FACTOR = 1.2  # context/runtime slack on top of raw weight size
 
 
-def rank_quant_variants(candidates: list[str], available_gb: float) -> list[QuantVariant]:
+def rank_quant_variants(
+    candidates: list[str], available_gb: float, param_count_b: float | None = None
+) -> list[QuantVariant]:
     """Rank a repo's .gguf files by hardware fit, best-fitting-and-highest-
-    quality first, so the CLI can default the picker's cursor there."""
+    quality first, so the CLI can default the picker's cursor there.
+
+    `param_count_b` is a repo-level fallback (from HF's own parsed GGUF
+    metadata) for filenames that don't spell out a param count, e.g.
+    "ID_Legal_Assistant_Q8_0.gguf" - the quant is still parseable per file,
+    but nothing in the name says "8B", so without a fallback every variant
+    of a repo like that shows "fit unknown" regardless of quant.
+    """
     variants = []
     for filename in candidates:
         quant_bits = parse_quant_bits(filename)
-        param_b = parse_param_count_billions(filename)
+        param_b = parse_param_count_billions(filename) or param_count_b
         if quant_bits is not None and param_b is not None:
             required_gb = param_b * quant_bits / 8 * _RAM_OVERHEAD_FACTOR
             fits = required_gb <= available_gb
@@ -91,7 +101,12 @@ def rank_quant_variants(candidates: list[str], available_gb: float) -> list[Quan
     return variants
 
 
-def _list_gguf_files(repo_id: str) -> list[str]:
+def _fetch_repo_gguf_info(repo_id: str) -> tuple[list[str], float | None]:
+    """List of .gguf filenames plus a repo-level param count fallback, in
+    billions - HF parses this straight out of the GGUF header itself
+    (response key "gguf.total") whether or not the filename spells it out,
+    so it covers names like "ID_Legal_Assistant_Q8_0.gguf" that carry a
+    quant tag but no param count."""
     try:
         resp = requests.get(HF_API.format(repo_id=repo_id), timeout=15)
         resp.raise_for_status()
@@ -107,8 +122,12 @@ def _list_gguf_files(repo_id: str) -> list[str]:
     except requests.RequestException as e:
         raise ModelResolutionError(f"Could not reach Hugging Face for '{repo_id}': {e}") from e
 
-    siblings = resp.json().get("siblings", [])
-    return [s["rfilename"] for s in siblings if s["rfilename"].endswith(".gguf")]
+    payload = resp.json()
+    siblings = payload.get("siblings", [])
+    files = [s["rfilename"] for s in siblings if s["rfilename"].endswith(".gguf")]
+    total_params = payload.get("gguf", {}).get("total")
+    param_count_b = total_params / 1e9 if total_params else None
+    return files, param_count_b
 
 
 def remote_file_sha256(repo_id: str, filename: str) -> str | None:
@@ -149,11 +168,11 @@ def resolve_model(model_name: str) -> ResolvedModel:
                 filename = f"{filename}.gguf"
         else:
             repo_id, filename = model_name, None
-            candidates = _list_gguf_files(repo_id)
+            candidates, param_count_b = _fetch_repo_gguf_info(repo_id)
             if not candidates:
                 raise ModelResolutionError(f"No .gguf files found in HF repo '{repo_id}'.")
             if len(candidates) > 1:
-                raise AmbiguousModelError(repo_id, candidates)
+                raise AmbiguousModelError(repo_id, candidates, param_count_b)
             filename = candidates[0]
         url = HF_DOWNLOAD.format(repo_id=repo_id, filename=filename)
         return ResolvedModel(url=url, filename=filename, repo_id=repo_id)

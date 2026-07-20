@@ -5,14 +5,18 @@ from omm.hub import AmbiguousModelError, resolve_model
 
 
 class _FakeResponse:
-    def __init__(self, siblings):
+    def __init__(self, siblings, gguf_total=None):
         self._siblings = siblings
+        self._gguf_total = gguf_total
 
     def raise_for_status(self):
         pass
 
     def json(self):
-        return {"siblings": self._siblings}
+        payload = {"siblings": self._siblings}
+        if self._gguf_total is not None:
+            payload["gguf"] = {"total": self._gguf_total}
+        return payload
 
 
 def test_resolve_model_raises_ambiguous_error_with_repo_and_candidates(monkeypatch):
@@ -60,3 +64,35 @@ def test_rank_quant_variants_marks_unparsable_filename_fit_as_unknown():
 
     assert ranked[0].fits is None
     assert ranked[0].required_gb is None
+
+
+def test_rank_quant_variants_falls_back_to_repo_level_param_count():
+    # Regression: filenames like "ID_Legal_Assistant_Q8_0.gguf" carry a
+    # quant tag but no param count, so per-filename parsing alone always
+    # reports "fit unknown" - even though HF's own GGUF-header parse (the
+    # "gguf.total" field from the repo API response) has the real count.
+    ranked = hub.rank_quant_variants(
+        ["ID_Legal_Assistant_Q8_0.gguf"], available_gb=6.0, param_count_b=8.19
+    )
+
+    assert ranked[0].fits is False
+    assert ranked[0].required_gb == pytest.approx(8.19 * 8 / 8 * 1.2)
+
+
+def test_resolve_model_ambiguous_error_carries_repo_level_param_count(monkeypatch):
+    monkeypatch.setattr(
+        hub.requests,
+        "get",
+        lambda url, timeout: _FakeResponse(
+            [
+                {"rfilename": "ID_Legal_Assistant_Q4_K_M.gguf"},
+                {"rfilename": "ID_Legal_Assistant_Q8_0.gguf"},
+            ],
+            gguf_total=8_190_735_360,
+        ),
+    )
+
+    with pytest.raises(AmbiguousModelError) as exc_info:
+        resolve_model("Azzindani/Deepseek_ID_Legal_Preview_GGUF")
+
+    assert exc_info.value.param_count_b == pytest.approx(8.19073536)

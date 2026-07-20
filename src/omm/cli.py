@@ -429,7 +429,7 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     has_gpu = info.vram_total_gb is not None
     available_gb = info.vram_total_gb if has_gpu else info.ram_total_gb
 
-    variants = rank_quant_variants(error.candidates, available_gb)
+    variants = rank_quant_variants(error.candidates, available_gb, error.param_count_b)
     choices = []
     for v in variants:
         if v.fits is True:
