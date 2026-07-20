@@ -20,6 +20,7 @@ def isolated_omm_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "REGISTRY_PATH", home / "models.json")
     monkeypatch.setattr(config, "RULES_PATH", home / "rules.json")
     monkeypatch.setattr(config, "RECOMMEND_MODEL_PATH", home / "recommend-model.json")
+    monkeypatch.setattr(config, "EVALUATIONS_DIR", home / "evaluations")
 
     monkeypatch.setattr(registry, "REGISTRY_PATH", config.REGISTRY_PATH)
     monkeypatch.setattr(cli, "MODELS_DIR", models_dir)

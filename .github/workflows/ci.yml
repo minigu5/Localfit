@@ -1,0 +1,60 @@
+name: Cross-platform validation
+
+"on":
+  push:
+  pull_request:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python 3.11 on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install Localfit test dependencies
+        run: python -m pip install -e ".[dev]" -r requirements-train.txt
+      - name: Run tests
+        run: python -m pytest -q
+      - name: Verify CLI entry point
+        run: omm --help
+
+  docker:
+    name: Reproducible Linux container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build test image
+        run: docker build --tag localfit-test .
+      - name: Run test image
+        run: docker run --rm localfit-test
+
+  firebase-rules:
+    name: Firebase rules emulator
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Compile rules and run authorization scenarios
+        run: >-
+          npx --yes firebase-tools@15.24.0 emulators:exec
+          --only database
+          --project demo-localfit
+          "node scripts/test_firebase_rules.mjs"

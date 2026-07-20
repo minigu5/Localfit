@@ -12,6 +12,7 @@ CONFIG_PATH = OMM_HOME / "config.json"
 REGISTRY_PATH = OMM_HOME / "models.json"
 RULES_PATH = OMM_HOME / "rules.json"
 RECOMMEND_MODEL_PATH = OMM_HOME / "recommend-model.json"
+EVALUATIONS_DIR = OMM_HOME / "evaluations"
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "telemetry_opt_in": False,
