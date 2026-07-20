@@ -53,3 +53,65 @@ def test_cached_remote_head_caches_none_result_without_refetching(isolated_omm_h
     assert first is None
     assert second is None
     assert calls == ["main"]
+
+
+def test_cached_remote_head_if_fresh_returns_false_on_cold_cache(isolated_omm_home):
+    assert version_check.cached_remote_head_if_fresh() == (False, None)
+
+
+def test_cached_remote_head_if_fresh_returns_cached_value_within_ttl(isolated_omm_home):
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": time.time(), "remote_head": "cached_sha"})
+    )
+
+    assert version_check.cached_remote_head_if_fresh(ttl_seconds=1800) == (True, "cached_sha")
+
+
+def test_cached_remote_head_if_fresh_returns_false_after_ttl_expires(isolated_omm_home):
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": time.time() - 9999, "remote_head": "old_sha"})
+    )
+
+    assert version_check.cached_remote_head_if_fresh(ttl_seconds=1800) == (False, None)
+
+
+def test_should_start_check_true_on_cold_cache(isolated_omm_home):
+    assert version_check.should_start_check() is True
+
+
+def test_should_start_check_false_within_ttl(isolated_omm_home):
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": time.time(), "remote_head": "cached_sha"})
+    )
+
+    assert version_check.should_start_check(ttl_seconds=1800) is False
+
+
+def test_should_start_check_false_when_another_check_already_in_flight(isolated_omm_home):
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": time.time() - 9999, "checking_since": time.time()})
+    )
+
+    assert version_check.should_start_check(ttl_seconds=1800) is False
+
+
+def test_should_start_check_true_when_in_flight_marker_is_stale(isolated_omm_home):
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": time.time() - 9999, "checking_since": time.time() - 9999})
+    )
+
+    assert version_check.should_start_check(ttl_seconds=1800) is True
+
+
+def test_mark_checking_sets_timestamp_without_clobbering_checked_at(isolated_omm_home):
+    checked_at = time.time() - 9999
+    (isolated_omm_home / "update_check.json").write_text(
+        json.dumps({"checked_at": checked_at, "remote_head": "old_sha"})
+    )
+
+    version_check.mark_checking()
+
+    cache = json.loads((isolated_omm_home / "update_check.json").read_text())
+    assert cache["checked_at"] == checked_at
+    assert cache["remote_head"] == "old_sha"
+    assert isinstance(cache["checking_since"], float)

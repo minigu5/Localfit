@@ -206,23 +206,21 @@ def _cached_remote_head_commit(ref: str = "main") -> str | None:
     return version_check.cached_remote_head(_remote_head_commit, ref)
 
 
-def _background_version_check(installed: str, done: threading.Event, result: dict) -> None:
-    try:
-        latest = _cached_remote_head_commit()
-        if latest and latest != installed:
-            result["latest"] = latest
-    except Exception:
-        pass  # never let a background check crash or hang the CLI
-    finally:
-        done.set()
+_SKIP_UPDATE_CHECK_SUBCOMMANDS = {"update", "help", "_bg-version-check"}
 
 
-def _print_update_notice(done: threading.Event, result: dict) -> None:
-    if done.is_set() and result.get("latest"):
+@app.command(name="_bg-version-check", hidden=True)
+def _bg_version_check_cmd() -> None:
+    """Internal. Spawned by `_maybe_start_update_check` as a detached child
+    so the `git ls-remote` round trip survives the short-lived parent
+    command exiting; writes the result to the shared cache for a later
+    `omm` invocation to pick up."""
+    version_check.cached_remote_head(_remote_head_commit)
+
+
+def _print_update_notice(latest: str | None, installed: str) -> None:
+    if latest and latest != installed:
         console.print("[yellow]Update available! Run: [bold]omm update[/bold][/yellow]")
-
-
-_SKIP_UPDATE_CHECK_SUBCOMMANDS = {"update", "help"}
 
 
 def _maybe_start_update_check(ctx: typer.Context) -> None:
@@ -231,17 +229,24 @@ def _maybe_start_update_check(ctx: typer.Context) -> None:
     installed = _installed_commit()
     if not installed:  # editable/dev install - nothing to compare against
         return
-    done = threading.Event()
-    result: dict[str, str] = {}
-    threading.Thread(
-        target=_background_version_check,
-        args=(installed, done, result),
-        daemon=True,
-    ).start()
-    ctx.call_on_close(lambda: _print_update_notice(done, result))
+    fresh, latest = version_check.cached_remote_head_if_fresh()
+    if fresh:
+        ctx.call_on_close(lambda: _print_update_notice(latest, installed))
+        return
+    if version_check.should_start_check():
+        version_check.mark_checking()
+        try:
+            subprocess.Popen(
+                [sys.executable, "-m", "omm.cli", "_bg-version-check"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError:
+            pass
 
 
-_SKIP_AUTO_IMPORT_SUBCOMMANDS = {"update", "help", "import"}
+_SKIP_AUTO_IMPORT_SUBCOMMANDS = {"update", "help", "import", "_bg-version-check"}
 
 
 def _maybe_auto_import(ctx: typer.Context) -> None:
