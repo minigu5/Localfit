@@ -1,0 +1,98 @@
+{
+  "schema_version": 1,
+  "pack_id": "localfit-gsm8k-bilingual-smoke",
+  "pack_version": "1.1.0",
+  "description": "A tiny, reproducible arithmetic smoke evaluation. It is not a leaderboard or a statistically representative quality benchmark.",
+  "generation": {
+    "temperature": 0,
+    "seed": 0,
+    "num_ctx": 4096,
+    "num_predict": 256,
+    "think": false
+  },
+  "sources": [
+    {
+      "name": "GSM8K",
+      "repository": "https://github.com/openai/grade-school-math",
+      "data": "https://github.com/openai/grade-school-math/blob/master/grade_school_math/data/test.jsonl",
+      "license": "MIT",
+      "citation": "Cobbe et al., Training Verifiers to Solve Math Word Problems, 2021",
+      "selection": "Zero-based test rows 0 through 7. Rows 4 through 7 are Korean translations made for Localfit; expected numeric answers are unchanged."
+    }
+  ],
+  "prompt_template": "Solve the arithmetic problem step by step. You may show your work. End your response with a separate final line in exactly this format: FINAL: <numeric answer>.\n\nProblem: {question}",
+  "items": [
+    {
+      "id": "gsm8k-test-0000-en",
+      "category": "reasoning_en",
+      "source_row": 0,
+      "language": "en",
+      "question": "Janet's ducks lay 16 eggs per day. She eats three for breakfast every morning and uses four to bake muffins. She sells each remaining egg for $2. How many dollars does she make each day?",
+      "answer_type": "number",
+      "expected": "18"
+    },
+    {
+      "id": "gsm8k-test-0001-en",
+      "category": "reasoning_en",
+      "source_row": 1,
+      "language": "en",
+      "question": "A robe takes 2 bolts of blue fiber and half that much white fiber. How many bolts in total does it take?",
+      "answer_type": "number",
+      "expected": "3"
+    },
+    {
+      "id": "gsm8k-test-0002-en",
+      "category": "reasoning_en",
+      "source_row": 2,
+      "language": "en",
+      "question": "Josh buys a house for $80,000 and spends $50,000 on repairs. The repairs increase the original value of the house by 150%. How many dollars of profit does he make when he sells at the new value?",
+      "answer_type": "number",
+      "expected": "70000"
+    },
+    {
+      "id": "gsm8k-test-0003-en",
+      "category": "reasoning_en",
+      "source_row": 3,
+      "language": "en",
+      "question": "James runs 3 sprints, 3 times a week. Each sprint is 60 meters. How many meters does he run in a week?",
+      "answer_type": "number",
+      "expected": "540"
+    },
+    {
+      "id": "gsm8k-test-0004-ko",
+      "category": "reasoning_ko",
+      "source_row": 4,
+      "language": "ko",
+      "question": "웬디는 매일 닭 한 마리당 사료 3컵을 세 끼로 나누어 준다. 닭은 20마리이고, 아침에 15컵, 오후에 25컵을 주었다. 마지막 끼니에는 사료를 몇 컵 주어야 하는가?",
+      "answer_type": "number",
+      "expected": "20"
+    },
+    {
+      "id": "gsm8k-test-0005-ko",
+      "category": "reasoning_ko",
+      "source_row": 5,
+      "language": "ko",
+      "question": "카일라는 유리잔 16개를 산다. 일반 가격은 한 개에 5달러이고, 매 두 번째 잔은 일반 가격의 60%이다. 모두 얼마를 내야 하는가?",
+      "answer_type": "number",
+      "expected": "64"
+    },
+    {
+      "id": "gsm8k-test-0006-ko",
+      "category": "reasoning_ko",
+      "source_row": 6,
+      "language": "ko",
+      "question": "시애틀에는 양이 20마리 있다. 찰스턴에는 시애틀의 4배가 있고, 툴루즈에는 찰스턴의 2배가 있다. 세 곳의 양은 모두 몇 마리인가?",
+      "answer_type": "number",
+      "expected": "260"
+    },
+    {
+      "id": "gsm8k-test-0007-ko",
+      "category": "reasoning_ko",
+      "source_row": 7,
+      "language": "ko",
+      "question": "칼라는 200GB 파일을 분당 2GB로 받는다. 40%를 받은 순간 윈도우 업데이트로 재시작하며 20분이 걸렸고, 그 뒤 처음부터 다시 받아야 했다. 전체 소요 시간은 몇 분인가?",
+      "answer_type": "number",
+      "expected": "160"
+    }
+  ]
+}

@@ -29,21 +29,24 @@ from rich.table import Table
 from omm import (
     benchmark,
     benchmark_history,
+    config as config_mod,
     linker,
     predictor,
+    quality as quality_mod,
     registry,
     rules as rules_mod,
     scan_import,
     search as search_mod,
     session_cache,
     telemetry,
+    tuning,
     version_check,
 )
 from omm import contribute as contribute_mod
 from omm.completion import complete_install_name, complete_remove_filename
 from omm.config import MODELS_DIR, load_config, save_config
 from omm.downloader import DownloadCancelled, DownloadError, download_file
-from omm.hardware import scan_hardware
+from omm.hardware import calculate_memory_budget, scan_hardware
 from omm.hashutil import sha256_file
 from omm.hub import (
     HF_DOWNLOAD,
@@ -127,6 +130,9 @@ def scan() -> None:
     table.add_row("CPU", info.cpu)
     table.add_row("RAM (total)", f"{info.ram_total_gb:.1f} GB")
     table.add_row("RAM (available)", f"{info.ram_available_gb:.1f} GB")
+    budget = calculate_memory_budget(info)
+    table.add_row("Safe model budget now", f"{budget.model_budget_gb:.1f} GB")
+    table.add_row("Reserved for apps/OS", f"{budget.ram_safety_reserve_gb:.1f} GB+")
 
     if info.unified_memory:
         table.add_row("Memory type", "Unified (Apple Silicon)")
@@ -470,7 +476,7 @@ def recommend() -> None:
             pass
 
     has_gpu = info.vram_total_gb is not None
-    available_gb = info.vram_total_gb if has_gpu else info.ram_total_gb
+    available_gb = calculate_memory_budget(info).model_budget_gb
 
     rule_list = rules_mod.load_rules()
     matches = rules_mod.matching_rules(rule_list, available_gb, has_gpu=has_gpu)
@@ -490,6 +496,68 @@ def recommend() -> None:
         raise typer.Exit(0)
 
     install(selected)
+
+
+def _print_runtime_profile(profile: tuning.RuntimeProfile) -> None:
+    table = Table(title=f"Recommended {profile.profile_name} runtime profile")
+    table.add_column("Setting", style="cyan")
+    table.add_column("Starting value")
+    table.add_row("Context length", f"{profile.context_length:,} tokens")
+    table.add_row("GPU offload", profile.gpu_offload_label)
+    table.add_row("CPU threads", str(profile.cpu_threads))
+    table.add_row("Batch size", str(profile.num_batch))
+    table.add_row("Safe model budget now", f"{profile.available_memory_gb:.1f} GB")
+    if profile.headroom_gb is not None:
+        table.add_row("Estimated memory headroom", f"{profile.headroom_gb:.1f} GB")
+    console.print(table)
+    console.print(
+        "[dim]These are conservative starting values; benchmark before "
+        "treating them as optimal.[/dim]"
+    )
+
+
+@app.command()
+def tune(
+    model_name: str = typer.Argument(..., autocompletion=complete_install_name),
+) -> None:
+    """Recommend context, GPU offload, threads, and batch size for a model."""
+    model_name = _resolve_ref(model_name)
+    filename, entry = _lookup_entry(model_name, registry.load_registry())
+
+    if entry is not None:
+        candidate = {
+            "name": filename,
+            "filename": filename,
+            "repo_id": entry.get("repo_id"),
+            "size_bytes": entry.get("size_bytes"),
+        }
+    else:
+        try:
+            resolved = resolve_model(model_name)
+        except (AmbiguousModelError, ModelResolutionError) as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
+        candidate = {
+            "name": resolved.filename,
+            "filename": resolved.filename,
+            "repo_id": resolved.repo_id,
+        }
+        artifact = predictor.load_cached_model()
+        if artifact:
+            candidate = next(
+                (
+                    published
+                    for published in artifact.get("candidates", [])
+                    if published.get("repo_id") == resolved.repo_id
+                    and published.get("filename") == resolved.filename
+                ),
+                candidate,
+            )
+
+    console.print(f"[bold]{candidate.get('filename') or candidate.get('name')}[/bold]")
+    _print_runtime_profile(
+        tuning.recommend_runtime_settings(scan_hardware(), candidate)
+    )
 
 
 def _resolve_ref(arg: str) -> str:
@@ -1149,6 +1217,76 @@ def autoremove() -> None:
         f"({ollama_manifests_removed} manifest(s) cleaned up), "
         f"{incomplete_removed} incomplete install file(s) cleaned up.[/green]"
     )
+
+
+@app.command(name="quality-eval")
+def quality_eval_cmd(
+    models: list[str] = typer.Argument(
+        ...,
+        help="One or more already-installed Ollama tags.",
+    ),
+    pack: Path | None = typer.Option(
+        None,
+        "--pack",
+        help="Use a different versioned JSON pack.",
+    ),
+    output: Path | None = typer.Option(
+        None,
+        "--output",
+        help="Write evidence to this JSON path.",
+    ),
+    speed_runs: int = typer.Option(3, "--speed-runs", min=1, max=10),
+    json_output: bool = typer.Option(
+        False,
+        "--json",
+        help="Also print the evidence JSON.",
+    ),
+) -> None:
+    """Measure a small reproducible quality pack and decode speed."""
+    if not benchmark.ollama_daemon_reachable():
+        console.print("[red]Ollama is not running at http://localhost:11434.[/red]")
+        raise typer.Exit(1)
+    if output is None:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        output = config_mod.EVALUATIONS_DIR / f"quality-{stamp}.json"
+    try:
+        report = quality_mod.collect_evidence(
+            models,
+            scan_hardware(),
+            pack_path=pack,
+            speed_runs=speed_runs,
+        )
+        quality_mod.write_evidence(report, output)
+    except quality_mod.QualityEvaluationError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+
+    table = Table(title="Localfit reproducible quality evidence")
+    table.add_column("Model", style="cyan")
+    table.add_column("Parameters")
+    table.add_column("Quantization")
+    table.add_column("Quality", justify="right")
+    table.add_column("Speed", justify="right")
+    for model in report["models"]:
+        model_quality = model["quality"]
+        table.add_row(
+            str(model["tag"]),
+            str(model.get("parameter_size") or "unknown"),
+            str(model.get("quantization_level") or "unknown"),
+            (
+                f"{model_quality['correct']}/{model_quality['total']} "
+                f"({model_quality['accuracy'] * 100:.1f}%)"
+            ),
+            f"{model['speed']['median_tokens_per_sec']:.1f} tok/s",
+        )
+    console.print(table)
+    console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
+    console.print(
+        "[dim]No generated text or raw hardware names were stored or uploaded. "
+        "This small smoke pack is not a leaderboard.[/dim]"
+    )
+    if json_output:
+        console.print_json(data=report)
 
 
 def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float | None) -> bool:
