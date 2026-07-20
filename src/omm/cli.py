@@ -4,10 +4,12 @@ import importlib.metadata
 import json
 import platform
 import subprocess
+import sys
 import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 
 import questionary
 import requests
@@ -31,6 +33,7 @@ from omm import (
     predictor,
     registry,
     rules as rules_mod,
+    scan_import,
     search as search_mod,
     session_cache,
     telemetry,
@@ -38,7 +41,7 @@ from omm import (
 )
 from omm import contribute as contribute_mod
 from omm.completion import complete_install_name, complete_remove_filename
-from omm.config import MODELS_DIR, load_config
+from omm.config import MODELS_DIR, load_config, save_config
 from omm.downloader import DownloadCancelled, DownloadError, download_file
 from omm.hardware import scan_hardware
 from omm.hashutil import sha256_file
@@ -74,6 +77,7 @@ def _root(ctx: typer.Context) -> None:
     if ctx.invoked_subcommand is None:
         console.print(f"omm {_omm_version()}")
         raise typer.Exit(0)
+    _maybe_auto_import(ctx)
     resent = telemetry.flush_pending()
     if resent:
         console.print(
@@ -235,6 +239,88 @@ def _maybe_start_update_check(ctx: typer.Context) -> None:
         daemon=True,
     ).start()
     ctx.call_on_close(lambda: _print_update_notice(done, result))
+
+
+_SKIP_AUTO_IMPORT_SUBCOMMANDS = {"update", "help", "import"}
+
+
+def _maybe_auto_import(ctx: typer.Context) -> None:
+    """One-time, best-effort offer to adopt stray .gguf files already
+    sitting in Ollama's/LM Studio's own directories into the omm hub.
+    Runs on the first interactive command after install (not from
+    install.sh itself - curl|sh has no TTY for questionary's prompts) and
+    never again once the flag is set, whether or not anything was found."""
+    if ctx.invoked_subcommand in _SKIP_AUTO_IMPORT_SUBCOMMANDS:
+        return
+    config = load_config()
+    if config.get("external_scan_done"):
+        return
+    if not sys.stdin.isatty():
+        return
+    config["external_scan_done"] = True
+    save_config(config)
+    _run_import_flow()
+
+
+def _run_import_flow(extra_path: Path | None = None) -> None:
+    found = scan_import.find_external_models(extra_path)
+    groups = scan_import.group_by_hash(found)
+    if not groups:
+        console.print("[dim]No externally-managed .gguf files found.[/dim]")
+        return
+
+    total_gb = sum(g.size_bytes for g in groups) / (1024**3)
+    console.print(
+        f"Found {len(groups)} model(s) ({len(found)} file(s), ~{total_gb:.1f} GB) "
+        "in Ollama/LM Studio not yet managed by omm."
+    )
+    if not _ask_confirm(f"Import {len(groups)} model(s) into the omm hub?"):
+        console.print("[yellow]Skipped.[/yellow]")
+        return
+
+    choices = [
+        questionary.Choice(
+            title=f"{g.display_name} ({g.size_bytes / (1024**3):.1f} GB, found in: {', '.join(g.engines)})",
+            value=g.sha256,
+            checked=True,
+        )
+        for g in groups
+    ]
+    selected_hashes = _ask_select(questionary.checkbox("Select which models to import:", choices=choices))
+    if not selected_hashes:
+        console.print("[yellow]Nothing selected, skipped.[/yellow]")
+        return
+
+    bytes_saved = 0
+    for group in groups:
+        if group.sha256 not in selected_hashes:
+            continue
+        result = scan_import.adopt_group(group)
+        bytes_saved += result.bytes_saved
+        console.print(f"  [green]Imported {result.filename}[/green]")
+
+    final_count = len(registry.load_registry())
+    console.print(
+        f"[bold green]Done: {final_count} model(s) in the omm hub, "
+        f"{bytes_saved / (1024**3):.1f} GB saved.[/bold green]"
+    )
+
+
+@app.command(name="import")
+def import_cmd(
+    path: str = typer.Argument(
+        None, help="Optional extra directory to also scan for stray .gguf files."
+    ),
+) -> None:
+    """Scan Ollama/LM Studio (and optionally PATH) for .gguf files not yet
+    managed by omm, and offer to adopt them into the hub."""
+    extra_path = None
+    if path:
+        extra_path = Path(path).expanduser()
+        if not extra_path.is_dir():
+            console.print(f"[red]Not a directory: {extra_path}[/red]")
+            raise typer.Exit(1)
+    _run_import_flow(extra_path)
 
 
 # pipx gives no byte-level install progress, but it does print a fixed,

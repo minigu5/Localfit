@@ -19,6 +19,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "rules_url": None,
     "model_url": "https://raw.githubusercontent.com/minigu5/Localfit/main/published/recommend-model.json",
     "default_engine": None,
+    "external_scan_done": False,
 }
 
 
