@@ -3,6 +3,7 @@
 import importlib.metadata
 import json
 import platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -442,6 +443,50 @@ def _run_pipx_install_with_progress(args: list[str]) -> subprocess.CompletedProc
         task_id = progress.add_task("upgrade", total=len(_PIPX_INSTALL_STAGES))
         result = _run_pipx_install(args, progress, task_id)
         progress.update(task_id, completed=len(_PIPX_INSTALL_STAGES))
+    return result
+
+
+def _migrate_to_editable_install() -> subprocess.CompletedProcess:
+    """First-run (or self-heal) path: (re)clone the repo into SRC_DIR and
+    pipx --editable-install it, so future `omm update` calls are a `git
+    pull` instead of a full pipx reinstall. Runs whenever SRC_DIR isn't a
+    valid git checkout - regardless of whether the currently installed
+    commit already matches latest, since the goal is switching mechanism,
+    not code."""
+    console.print("[cyan]Migrating to fast-update mode (one-time)...[/cyan]")
+    shutil.rmtree(SRC_DIR, ignore_errors=True)
+    try:
+        clone = subprocess.run(
+            ["git", "clone", "--filter=blob:none", "--quiet", _BARE_REPO_URL, str(SRC_DIR)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess([], 1, stdout="", stderr="git clone timed out")
+    if clone.returncode != 0:
+        return clone
+    return _run_pipx_install_with_progress(
+        ["pipx", "install", "--force", "--editable", _install_spec()]
+    )
+
+
+def _git_update_src() -> subprocess.CompletedProcess:
+    """Fast path for an already-migrated install: fetch + fast-forward the
+    persistent clone in place. The editable install's .pth points straight
+    at SRC_DIR/src, so this alone is enough to pick up code changes - no
+    pipx call needed unless dependencies themselves changed (checked by
+    the caller via _deps_satisfied())."""
+    for args in (
+        ["git", "-C", str(SRC_DIR), "fetch", "--quiet", "origin", "main"],
+        ["git", "-C", str(SRC_DIR), "reset", "--hard", "--quiet", "origin/main"],
+    ):
+        try:
+            result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        except subprocess.TimeoutExpired:
+            return subprocess.CompletedProcess(args, 1, stdout="", stderr="git command timed out")
+        if result.returncode != 0:
+            return result
     return result
 
 

@@ -293,6 +293,82 @@ def test_src_head_commit_returns_none_when_rev_parse_fails(monkeypatch, tmp_path
     assert cli._src_head_commit() is None
 
 
+def test_migrate_to_editable_install_clones_then_pipx_installs(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+    run_calls = []
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: run_calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+    progress_calls = []
+    monkeypatch.setattr(
+        cli,
+        "_run_pipx_install_with_progress",
+        lambda args: progress_calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    result = cli._migrate_to_editable_install()
+
+    assert result.returncode == 0
+    assert run_calls == [["git", "clone", "--filter=blob:none", "--quiet", cli._BARE_REPO_URL, str(src)]]
+    assert progress_calls == [["pipx", "install", "--force", "--editable", str(src)]]
+
+
+def test_migrate_to_editable_install_skips_pipx_when_clone_fails(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "SRC_DIR", tmp_path / "src")
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout="", stderr="clone failed"),
+    )
+    progress_calls = []
+    monkeypatch.setattr(cli, "_run_pipx_install_with_progress", lambda args: progress_calls.append(args))
+
+    result = cli._migrate_to_editable_install()
+
+    assert result.returncode == 1
+    assert progress_calls == []
+
+
+def test_git_update_src_fetches_then_resets(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    run_calls = []
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: run_calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+    )
+
+    result = cli._git_update_src()
+
+    assert result.returncode == 0
+    assert run_calls == [
+        ["git", "-C", str(src), "fetch", "--quiet", "origin", "main"],
+        ["git", "-C", str(src), "reset", "--hard", "--quiet", "origin/main"],
+    ]
+
+
+def test_git_update_src_stops_after_fetch_failure(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    run_calls = []
+
+    def fake_run(args, **kwargs):
+        run_calls.append(args)
+        return subprocess.CompletedProcess(args, 1, stdout="", stderr="fetch failed")
+
+    monkeypatch.setattr(cli.subprocess, "run", fake_run)
+
+    result = cli._git_update_src()
+
+    assert result.returncode == 1
+    assert len(run_calls) == 1
+
+
 def test_run_pipx_install_advances_progress_on_known_stage_lines(monkeypatch):
     lines = [
         "creating virtual environment...\n",
