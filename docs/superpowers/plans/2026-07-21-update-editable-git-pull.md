@@ -50,7 +50,7 @@ check` finds a genuinely new/changed dependency.
 **Interfaces:**
 - Produces: `cli.SRC_DIR: Path` (= `OMM_HOME / "src"`), `cli._src_head_commit() -> str | None`
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_cli_update.py` (near the bottom, after the `_remote_head_commit` tests, before `test_run_pipx_install_advances_progress_on_known_stage_lines`):
 
@@ -87,12 +87,12 @@ def test_src_head_commit_returns_none_when_rev_parse_fails(monkeypatch, tmp_path
     assert cli._src_head_commit() is None
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k src_head_commit -v`
 Expected: FAIL with `AttributeError: module 'omm.cli' has no attribute 'SRC_DIR'` (or `_src_head_commit`)
 
-- [ ] **Step 3: Add the import, constant, and function**
+- [x] **Step 3: Add the import, constant, and function**
 
 In `src/omm/cli.py:49`, change:
 
@@ -133,17 +133,17 @@ def _src_head_commit() -> str | None:
     return result.stdout.strip()
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [x] **Step 4: Run tests to verify they pass**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k src_head_commit -v`
 Expected: 3 passed
 
-- [ ] **Step 5: Run the full suite (must still be green — nothing else references SRC_DIR yet)**
+- [x] **Step 5: Run the full suite (must still be green — nothing else references SRC_DIR yet)**
 
 Run: `.venv/bin/python -m pytest tests -q`
 Expected: all pass (321 + 3 new = 324)
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/omm/cli.py tests/test_cli_update.py
@@ -162,7 +162,7 @@ git commit -m "feat: add SRC_DIR + _src_head_commit for the editable-clone updat
 - Consumes: `cli._src_head_commit() -> str | None` (Task 1)
 - Produces: `cli._installed_commit()` behavior unchanged for callers (still `() -> str | None`), but now checks the clone first.
 
-- [ ] **Step 1: Write the failing test**
+- [x] **Step 1: Write the failing test**
 
 Add to `tests/test_cli_update.py`, near the existing `test_installed_commit_*` tests:
 
@@ -179,12 +179,12 @@ def test_installed_commit_prefers_src_head_over_direct_url_json(monkeypatch):
     assert cli._installed_commit() == "from-src-clone"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [x] **Step 2: Run test to verify it fails**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k prefers_src_head -v`
 Expected: FAIL — `_installed_commit()` returns `"from-direct-url"`, not `"from-src-clone"`
 
-- [ ] **Step 3: Update `_installed_commit()`**
+- [x] **Step 3: Update `_installed_commit()`**
 
 Replace `src/omm/cli.py:204-215`:
 
@@ -223,7 +223,7 @@ def _installed_commit() -> str | None:
     return json.loads(raw).get("vcs_info", {}).get("commit_id")
 ```
 
-- [ ] **Step 4: Run the two other existing `_installed_commit` tests plus the new one**
+- [x] **Step 4: Run the two other existing `_installed_commit` tests plus the new one**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k installed_commit -v`
 Expected: 4 passed (`test_installed_commit_reads_vcs_info_from_direct_url_json`,
@@ -235,12 +235,12 @@ three still pass unmodified because on this dev machine
 exist), so `_src_head_commit()` returns `None` and falls through to the
 mocked `direct_url.json` path exactly as before.
 
-- [ ] **Step 5: Run the full suite**
+- [x] **Step 5: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests -q`
 Expected: all pass
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add src/omm/cli.py tests/test_cli_update.py
@@ -259,7 +259,7 @@ git commit -m "feat: _installed_commit prefers the editable clone's HEAD"
 - Consumes: `cli.SRC_DIR` (Task 1)
 - Produces: `cli._install_spec() -> str` now returns a local path spec (`str(SRC_DIR)` or `f"{SRC_DIR}[nvidia]"`) instead of a git URL spec. Used by Task 4/5's pipx calls.
 
-- [ ] **Step 1: Update the two existing tests**
+- [x] **Step 1: Update the two existing tests**
 
 Replace `tests/test_cli_update.py:21-30`:
 
@@ -291,12 +291,12 @@ def test_install_spec_adds_nvidia_extra_on_non_darwin(monkeypatch):
     assert cli._install_spec() == f"{cli.SRC_DIR}[nvidia]"
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k install_spec -v`
 Expected: FAIL — `_install_spec()` still returns `cli.REPO_URL`-based strings
 
-- [ ] **Step 3: Update `_install_spec()`**
+- [x] **Step 3: Update `_install_spec()`**
 
 Replace `src/omm/cli.py:130-136`:
 
@@ -323,7 +323,7 @@ def _install_spec() -> str:
     return f"{SRC_DIR}[nvidia]"
 ```
 
-- [ ] **Step 4: Run tests, then the full suite**
+- [x] **Step 4: Run tests, then the full suite**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k install_spec -v`
 Expected: 2 passed
@@ -335,7 +335,7 @@ Expected: all pass (some `update()`-level tests that reference
 fixed in Task 5. If you're running this task in isolation, note the
 failures and continue; do not fix them yet.)
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add src/omm/cli.py tests/test_cli_update.py
@@ -354,7 +354,7 @@ git commit -m "feat: _install_spec points at the local editable clone"
 - Consumes: `cli.SRC_DIR`, `cli._BARE_REPO_URL`, `cli._install_spec()`, `cli._run_pipx_install_with_progress(args: list[str]) -> subprocess.CompletedProcess` (already exists)
 - Produces: `cli._migrate_to_editable_install() -> subprocess.CompletedProcess`, `cli._git_update_src() -> subprocess.CompletedProcess`. Both used by Task 5's `update()`.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 Add to `tests/test_cli_update.py`:
 
@@ -435,12 +435,12 @@ def test_git_update_src_stops_after_fetch_failure(monkeypatch, tmp_path):
     assert len(run_calls) == 1
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k "migrate_to_editable or git_update_src" -v`
 Expected: FAIL with `AttributeError: module 'omm.cli' has no attribute '_migrate_to_editable_install'` (or `_git_update_src`)
 
-- [ ] **Step 3: Add `import shutil`**
+- [x] **Step 3: Add `import shutil`**
 
 In `src/omm/cli.py:3`, change:
 
@@ -461,7 +461,7 @@ import shutil
 import subprocess
 ```
 
-- [ ] **Step 4: Add the two helper functions**
+- [x] **Step 4: Add the two helper functions**
 
 In `src/omm/cli.py`, right after the `_run_pipx_install_with_progress` function (currently ends around line 418, right before `@app.command()` / `def update()`), add:
 
@@ -510,17 +510,17 @@ def _git_update_src() -> subprocess.CompletedProcess:
     return result
 ```
 
-- [ ] **Step 5: Run the new tests**
+- [x] **Step 5: Run the new tests**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -k "migrate_to_editable or git_update_src" -v`
 Expected: 4 passed
 
-- [ ] **Step 6: Run the full suite**
+- [x] **Step 6: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests -q`
 Expected: same pass/fail state as end of Task 3 (these are new, additive tests; the pre-existing `update()`-level failures from Task 3 are still expected and untouched until Task 5)
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add src/omm/cli.py tests/test_cli_update.py
@@ -539,7 +539,7 @@ git commit -m "feat: add migration and fast-path git helpers for omm update"
 - Consumes: `cli._src_head_commit`, `cli._installed_commit`, `cli._remote_head_commit`, `cli.version_check.record`, `cli._migrate_to_editable_install`, `cli._git_update_src`, `cli._deps_satisfied`, `cli._run_pipx_install_with_progress`, `cli._install_spec`, `cli._refresh_data` (all already exist per Tasks 1-4)
 - Produces: `update()` typer command, unchanged CLI signature (`omm update`, no args)
 
-- [ ] **Step 1: Replace `update()`**
+- [x] **Step 1: Replace `update()`**
 
 Find the current `update()` command in `src/omm/cli.py` (starts with
 `@app.command()` / `def update() -> None:`, currently around line 422) and
@@ -586,7 +586,7 @@ def update() -> None:
     _refresh_data()
 ```
 
-- [ ] **Step 2: Delete the two now-redundant tests that directly asserted the old single pipx-install call shape**
+- [x] **Step 2: Delete the two now-redundant tests that directly asserted the old single pipx-install call shape**
 
 In `tests/test_cli_update.py`, delete these two whole test functions (they
 tested exact `pipx install --force <URL>` args — that call shape no longer
@@ -596,7 +596,7 @@ fast-path tests below):
 - `test_update_reinstalls_when_installed_commit_differs_from_remote`
 - `test_update_falls_back_to_full_install_when_deps_missing_after_no_deps_install`
 
-- [ ] **Step 3: Update the two "already up to date" / "stale cache" tests to force fast-path**
+- [x] **Step 3: Update the two "already up to date" / "stale cache" tests to force fast-path**
 
 Find `test_update_skips_reinstall_when_already_up_to_date` and add one
 line so it explicitly simulates a migrated install (otherwise `update()`
@@ -655,7 +655,7 @@ def test_update_refreshes_stale_cache_with_live_remote_head(monkeypatch):
 
 (Only change: added the `_src_head_commit` monkeypatch line.)
 
-- [ ] **Step 4: Fix the pipx-missing / pipx-failure tests to go through the fast path**
+- [x] **Step 4: Fix the pipx-missing / pipx-failure tests to go through the fast path**
 
 Replace `test_update_reports_error_when_pipx_missing`:
 
@@ -713,7 +713,7 @@ def test_update_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatch
     assert refresh_calls == []
 ```
 
-- [ ] **Step 5: Add the new orchestration tests**
+- [x] **Step 5: Add the new orchestration tests**
 
 Add to `tests/test_cli_update.py`:
 
@@ -812,17 +812,17 @@ def test_update_reports_error_when_git_update_fails(monkeypatch):
     assert refresh_calls == []
 ```
 
-- [ ] **Step 6: Run the update tests**
+- [x] **Step 6: Run the update tests**
 
 Run: `.venv/bin/python -m pytest tests/test_cli_update.py -v`
 Expected: all pass (count = previous total minus 3 deleted plus 4 new)
 
-- [ ] **Step 7: Run the full suite**
+- [x] **Step 7: Run the full suite**
 
 Run: `.venv/bin/python -m pytest tests -q`
 Expected: all pass
 
-- [ ] **Step 8: Commit**
+- [x] **Step 8: Commit**
 
 ```bash
 git add src/omm/cli.py tests/test_cli_update.py
@@ -839,7 +839,7 @@ git commit -m "feat: omm update uses git pull on the fast path, migrates once"
 **Interfaces:**
 - None (shell script, no Python interface)
 
-- [ ] **Step 1: Replace the `REPO_URL`/`INSTALL_SPEC` header block**
+- [x] **Step 1: Replace the `REPO_URL`/`INSTALL_SPEC` header block**
 
 Replace `install.sh` lines 5-13:
 
@@ -862,7 +862,7 @@ REPO_URL="https://github.com/minigu5/Localfit.git"
 SRC_DIR="$HOME/.omm/src"
 ```
 
-- [ ] **Step 2: Replace the install invocation near the end of the file**
+- [x] **Step 2: Replace the install invocation near the end of the file**
 
 Replace:
 
@@ -890,7 +890,7 @@ echo "Installing omm (editable) from $SRC_DIR ..."
 run_pipx install --force --editable "$INSTALL_SPEC"
 ```
 
-- [ ] **Step 3: Shell-syntax check**
+- [x] **Step 3: Shell-syntax check**
 
 Run: `sh -n install.sh`
 Expected: no output (syntax OK)
@@ -899,7 +899,7 @@ If `shellcheck` is installed, also run: `shellcheck install.sh` and fix any
 new warnings introduced by this change (pre-existing warnings unrelated to
 this diff are out of scope).
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add install.sh
@@ -914,14 +914,14 @@ git commit -m "feat: install.sh clones omm and installs it --editable"
 
 **Interfaces:** none
 
-- [ ] **Step 1: Confirm current real install state, then simulate a fresh (not-yet-migrated) install**
+- [x] **Step 1: Confirm current real install state, then simulate a fresh (not-yet-migrated) install**
 
 ```bash
 ls ~/.omm/src 2>&1   # expect: No such file or directory
 which omm             # note the path, e.g. /Users/you/.local/bin/omm
 ```
 
-- [ ] **Step 2: Run the real migration path**
+- [x] **Step 2: Run the real migration path**
 
 ```bash
 omm update
@@ -938,7 +938,7 @@ ls ~/.omm/src/.git    # expect: this now exists
 git -C ~/.omm/src log -1 --oneline
 ```
 
-- [ ] **Step 3: Verify editable wiring**
+- [x] **Step 3: Verify editable wiring**
 
 ```bash
 find "$HOME/Library/Application Support/pipx/venvs/omm" -iname "_editable_impl_omm.pth" -exec cat {} \;
@@ -948,7 +948,7 @@ Expected: prints `~/.omm/src/src` (the persistent clone's `src/`
 directory) — confirms `omm`'s installed package really is a live pointer
 at the clone, not a copied snapshot.
 
-- [ ] **Step 4: Verify the fast-forward-with-real-change path**
+- [x] **Step 4: Verify the fast-forward-with-real-change path**
 
 ```bash
 git -C ~/.omm/src reset --hard HEAD~1   # move the local clone one commit behind
@@ -964,7 +964,7 @@ is on the order of ~1-2 seconds, not ~6-9.
 git -C ~/.omm/src log -1 --oneline   # back at the latest commit
 ```
 
-- [ ] **Step 5: Verify self-healing on a corrupted clone**
+- [x] **Step 5: Verify self-healing on a corrupted clone**
 
 ```bash
 rm -rf ~/.omm/src/.git
@@ -974,7 +974,7 @@ omm update
 Expected: prints `Migrating to fast-update mode (one-time)...` again
 (self-heals), succeeds.
 
-- [ ] **Step 6: Sanity-check the CLI still works end to end**
+- [x] **Step 6: Sanity-check the CLI still works end to end**
 
 ```bash
 omm scan
@@ -984,7 +984,7 @@ omm --help
 Expected: both run normally, no import errors, no crash — confirms the
 editable install's entry points and module resolution are intact.
 
-- [ ] **Step 7: Report results**
+- [x] **Step 7: Report results**
 
 No commit for this task (verification only). Summarize the observed
 timings and confirm all steps above matched expectations before
