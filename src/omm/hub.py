@@ -102,6 +102,31 @@ def rank_quant_variants(
     return variants
 
 
+def best_filenames_by_tier(
+    variants: list[QuantVariant], predicted_speed: dict[str, float]
+) -> set[str]:
+    """Fastest filename per quant_bits tier, using only the (repo_id,
+    filename) pairs the caller already resolved a predicted speed for -
+    every other variant (didn't fit, speed unresolvable) is left out of
+    consideration entirely rather than guessed at.
+
+    Ties keep whichever filename appears first in `variants` (already
+    sorted fits-desc/quant_bits-desc by `rank_quant_variants`), via the
+    strict `>` below.
+    """
+    best_for_tier: dict[float, tuple[str, float]] = {}
+    for variant in variants:
+        if variant.quant_bits is None:
+            continue
+        speed = predicted_speed.get(variant.filename)
+        if speed is None:
+            continue
+        current = best_for_tier.get(variant.quant_bits)
+        if current is None or speed > current[1]:
+            best_for_tier[variant.quant_bits] = (variant.filename, speed)
+    return {filename for filename, _ in best_for_tier.values()}
+
+
 def _fetch_repo_gguf_info(repo_id: str) -> tuple[list[str], float | None]:
     """List of .gguf filenames plus a repo-level param count fallback, in
     billions - HF parses this straight out of the GGUF header itself

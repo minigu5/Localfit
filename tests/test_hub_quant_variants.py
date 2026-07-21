@@ -96,3 +96,52 @@ def test_resolve_model_ambiguous_error_carries_repo_level_param_count(monkeypatc
         resolve_model("Azzindani/Deepseek_ID_Legal_Preview_GGUF")
 
     assert exc_info.value.param_count_b == pytest.approx(8.19073536)
+
+
+def test_best_filenames_by_tier_picks_fastest_per_quant_tier():
+    variants = [
+        hub.QuantVariant("q4-a.gguf", quant_bits=4.0, required_gb=4.0, fits=True),
+        hub.QuantVariant("q4-b.gguf", quant_bits=4.0, required_gb=4.0, fits=True),
+        hub.QuantVariant("q5-a.gguf", quant_bits=5.0, required_gb=5.0, fits=True),
+        hub.QuantVariant("q5-b.gguf", quant_bits=5.0, required_gb=5.0, fits=True),
+    ]
+    predicted_speed = {
+        "q4-a.gguf": 10.0,
+        "q4-b.gguf": 12.0,
+        "q5-a.gguf": 8.0,
+        "q5-b.gguf": 6.0,
+    }
+
+    best = hub.best_filenames_by_tier(variants, predicted_speed)
+
+    assert best == {"q4-b.gguf", "q5-a.gguf"}
+
+
+def test_best_filenames_by_tier_ties_resolve_to_first_in_list_order():
+    variants = [
+        hub.QuantVariant("first.gguf", quant_bits=4.0, required_gb=4.0, fits=True),
+        hub.QuantVariant("second.gguf", quant_bits=4.0, required_gb=4.0, fits=True),
+    ]
+    predicted_speed = {"first.gguf": 10.0, "second.gguf": 10.0}
+
+    best = hub.best_filenames_by_tier(variants, predicted_speed)
+
+    assert best == {"first.gguf"}
+
+
+def test_best_filenames_by_tier_ignores_variants_missing_from_speed_map():
+    variants = [
+        hub.QuantVariant("known.gguf", quant_bits=4.0, required_gb=4.0, fits=True),
+        hub.QuantVariant("unknown.gguf", quant_bits=4.0, required_gb=4.0, fits=None),
+    ]
+    predicted_speed = {"known.gguf": 10.0}
+
+    best = hub.best_filenames_by_tier(variants, predicted_speed)
+
+    assert best == {"known.gguf"}
+
+
+def test_best_filenames_by_tier_empty_speed_map_returns_empty_set():
+    variants = [hub.QuantVariant("a.gguf", quant_bits=4.0, required_gb=4.0, fits=True)]
+
+    assert hub.best_filenames_by_tier(variants, {}) == set()
