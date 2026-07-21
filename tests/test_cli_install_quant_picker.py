@@ -74,3 +74,79 @@ def test_install_cancels_cleanly_when_quant_prompt_is_escaped(isolated_omm_home,
 
     assert result.exit_code == 0
     assert "Cancelled" in result.stdout
+
+
+def test_quant_picker_marks_predicted_fastest_variant_green(isolated_omm_home, monkeypatch):
+    # _HARDWARE has ram_total_gb=6.0 -> model budget is min(6.0*0.8, 6.0-2.0) = 4.0GB
+    # (see hardware.calculate_memory_budget). A 3B model at Q4 needs
+    # 3 * 4 / 8 * 1.2 = 1.8GB, comfortably under that budget so both variants
+    # land in the same "fits" quant_bits=4.0 tier.
+    repo_id = "TheBloke/OpenLlama-3B-GGUF"
+    candidates = ["openllama-3b.Q4_K_S.gguf", "openllama-3b.Q4_K_M.gguf"]
+
+    def fake_resolve(name):
+        raise AmbiguousModelError(repo_id, candidates)
+
+    monkeypatch.setattr(cli, "resolve_model", fake_resolve)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _HARDWARE)
+    monkeypatch.setattr(
+        cli.predictor, "load_cached_model", lambda: {"trees": ["stub-tree"]}
+    )
+
+    def fake_predict_speed(trees, hw, candidate):
+        # Q4_K_M "wins" its tier, Q4_K_S loses it.
+        return 12.0 if candidate["filename"] == "openllama-3b.Q4_K_M.gguf" else 5.0
+
+    monkeypatch.setattr(cli.predictor, "predict_speed", fake_predict_speed)
+
+    captured_choices = {}
+
+    def fake_select(message, choices):
+        captured_choices["choices"] = choices
+        return None
+
+    monkeypatch.setattr(cli.questionary, "select", fake_select)
+    monkeypatch.setattr(cli, "_ask_select", lambda question: None)
+
+    result = runner.invoke(cli.app, ["install", repo_id])
+
+    assert result.exit_code == 0
+    titles_by_filename = {c.value: c.title for c in captured_choices["choices"]}
+    fast_title = titles_by_filename["openllama-3b.Q4_K_M.gguf"]
+    slow_title = titles_by_filename["openllama-3b.Q4_K_S.gguf"]
+    assert fast_title == [
+        (
+            "fg:green bold",
+            "openllama-3b.Q4_K_M.gguf  (✓ fits, ~1.8GB needed, predicted fastest)",
+        )
+    ]
+    assert isinstance(slow_title, str)
+    assert "predicted fastest" not in slow_title
+
+
+def test_quant_picker_no_green_marks_when_predictor_model_uncached(isolated_omm_home, monkeypatch):
+    repo_id = "TheBloke/Llama-2-7B-GGUF"
+    candidates = ["llama-2-7b.Q4_K_M.gguf"]
+
+    def fake_resolve(name):
+        raise AmbiguousModelError(repo_id, candidates)
+
+    monkeypatch.setattr(cli, "resolve_model", fake_resolve)
+    monkeypatch.setattr(cli, "scan_hardware", lambda: _HARDWARE)
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+
+    captured_choices = {}
+
+    def fake_select(message, choices):
+        captured_choices["choices"] = choices
+        return None
+
+    monkeypatch.setattr(cli.questionary, "select", fake_select)
+    monkeypatch.setattr(cli, "_ask_select", lambda question: None)
+
+    result = runner.invoke(cli.app, ["install", repo_id])
+
+    assert result.exit_code == 0
+    (choice,) = captured_choices["choices"]
+    assert isinstance(choice.title, str)
+    assert "predicted fastest" not in choice.title

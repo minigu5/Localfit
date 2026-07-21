@@ -49,13 +49,15 @@ from omm import contribute as contribute_mod
 from omm.completion import complete_install_name, complete_remove_filename
 from omm.config import MODELS_DIR, OMM_HOME, load_config, save_config
 from omm.downloader import DownloadCancelled, DownloadError, download_file
-from omm.hardware import calculate_memory_budget, scan_hardware
+from omm.hardware import HardwareInfo, calculate_memory_budget, scan_hardware
 from omm.hashutil import sha256_file
 from omm.hub import (
     HF_DOWNLOAD,
     AmbiguousModelError,
     ModelResolutionError,
+    QuantVariant,
     ResolvedModel,
+    best_filenames_by_tier,
     rank_quant_variants,
     remote_file_size,
     remote_file_sha256,
@@ -715,10 +717,35 @@ def _resolve_ref(arg: str) -> str:
     return results[idx - 1]
 
 
+def _predicted_fastest_filenames(
+    variants: list[QuantVariant], repo_id: str | None, hw: HardwareInfo
+) -> set[str]:
+    """Filenames that are the fastest-predicted variant in their quant-bits
+    tier, per the cached ML speed model. Empty when no model is cached, so
+    callers fall back to plain (uncolored) rendering."""
+    artifact = predictor.load_cached_model()
+    trees = artifact.get("trees") if artifact else None
+    if trees is None:
+        return set()
+
+    predicted_speed = {}
+    for variant in variants:
+        if variant.fits is not True:
+            continue
+        candidate = {"repo_id": repo_id, "filename": variant.filename}
+        speed = predictor.predict_speed(trees, hw, candidate)
+        if speed > 0:
+            predicted_speed[variant.filename] = speed
+
+    return best_filenames_by_tier(variants, predicted_speed)
+
+
 def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     """Rank the ambiguous repo's .gguf files by fit against this PC's RAM/VRAM
     and let the user pick one, cursor defaulted to the best-fitting, highest
-    quality option."""
+    quality option. The predicted-fastest variant in each quant-bits tier is
+    highlighted in green, per the cached ML speed model (skipped entirely if
+    no model is cached)."""
     info = scan_hardware()
     available_gb = calculate_memory_budget(info).model_budget_gb
 
@@ -745,6 +772,8 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
         resolved_variants,
         key=lambda variant: (variant.fits is not True, -(variant.quant_bits or 0)),
     )
+    fastest_filenames = _predicted_fastest_filenames(variants, error.repo_id, info)
+
     choices = []
     for v in variants:
         if v.fits is True:
@@ -753,7 +782,11 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
             note = f"may not fit, ~{v.required_gb:.1f}GB needed (you have {available_gb:.1f}GB)"
         else:
             note = "fit unknown"
-        choices.append(questionary.Choice(title=f"{v.filename}  ({note})", value=v.filename))
+        if v.filename in fastest_filenames:
+            title = [("fg:green bold", f"{v.filename}  ({note}, predicted fastest)")]
+        else:
+            title = f"{v.filename}  ({note})"
+        choices.append(questionary.Choice(title=title, value=v.filename))
 
     return _ask_select(
         questionary.select(f"Select a quantization variant for '{error.repo_id}':", choices=choices)
