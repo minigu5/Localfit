@@ -48,7 +48,7 @@ def test_corrupt_files_are_preserved_before_safe_fallback(isolated_omm_home):
     config.CONFIG_PATH.write_text("{broken-config")
     config.REGISTRY_PATH.write_text("{broken-registry")
 
-    assert config.load_config()["telemetry_opt_in"] is False
+    assert config.load_config()["telemetry_send_policy"] == "ask"
     assert registry.load_registry() == {}
     assert list(config.CONFIG_PATH.parent.glob("config.json.corrupt-*"))
     assert list(config.REGISTRY_PATH.parent.glob("models.json.corrupt-*"))

@@ -35,3 +35,28 @@ def test_explicit_legacy_firebase_opt_in_is_preserved(isolated_omm_home):
 
     assert loaded["telemetry_endpoint"] == config.LEGACY_FIREBASE_ENDPOINT
     assert loaded["telemetry_backend"] == "firebase_legacy"
+
+
+def test_telemetry_opt_in_true_migrates_to_always_policy(isolated_omm_home):
+    config.CONFIG_PATH.write_text(json.dumps({"telemetry_opt_in": True}))
+
+    loaded = config.load_config()
+
+    assert loaded["telemetry_send_policy"] == "always"
+    assert "telemetry_opt_in" not in loaded
+
+
+def test_telemetry_opt_in_false_migrates_to_ask_policy(isolated_omm_home):
+    config.CONFIG_PATH.write_text(json.dumps({"telemetry_opt_in": False}))
+
+    loaded = config.load_config()
+
+    assert loaded["telemetry_send_policy"] == "ask"
+    assert "telemetry_opt_in" not in loaded
+
+
+def test_fresh_config_defaults_to_ask_policy(isolated_omm_home):
+    loaded = config.load_config()
+
+    assert loaded["telemetry_send_policy"] == "ask"
+    assert loaded["contribute_always_ack"] is False

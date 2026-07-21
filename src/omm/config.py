@@ -22,7 +22,7 @@ LEGACY_FIREBASE_ENDPOINT = (
 )
 
 DEFAULT_CONFIG: dict[str, Any] = {
-    "telemetry_opt_in": False,
+    "telemetry_send_policy": "ask",
     # Local-only by default. Teams may configure the bundled FastAPI server;
     # Firebase remains an explicit legacy compatibility option.
     "telemetry_endpoint": None,
@@ -34,6 +34,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "catalog_manifest_url": None,
     "catalog_public_key": None,
     "ui_mode": "compact",
+    "contribute_always_ack": False,
 }
 
 
@@ -42,10 +43,16 @@ def ensure_omm_home() -> None:
 
 
 def _merge_config(data: dict[str, Any]) -> dict[str, Any]:
+    if "telemetry_send_policy" not in data and "telemetry_opt_in" in data:
+        data = {
+            **data,
+            "telemetry_send_policy": "always" if data["telemetry_opt_in"] else "ask",
+        }
     merged = {**DEFAULT_CONFIG, **data}
+    merged.pop("telemetry_opt_in", None)
     if "telemetry_backend" not in data:
         endpoint = data.get("telemetry_endpoint")
-        if endpoint == LEGACY_FIREBASE_ENDPOINT and not data.get("telemetry_opt_in"):
+        if endpoint == LEGACY_FIREBASE_ENDPOINT and merged.get("telemetry_send_policy") != "always":
             merged["telemetry_endpoint"] = None
             merged["telemetry_backend"] = "local"
         elif isinstance(endpoint, str) and "firebaseio.com" in endpoint:
