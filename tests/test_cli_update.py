@@ -199,6 +199,18 @@ def test_installed_commit_returns_none_when_package_not_found(monkeypatch):
     assert cli._installed_commit() is None
 
 
+def test_installed_commit_prefers_src_head_over_direct_url_json(monkeypatch):
+    monkeypatch.setattr(cli, "_src_head_commit", lambda: "from-src-clone")
+
+    class _FakeDist:
+        def read_text(self, name):
+            return '{"url": "https://x", "vcs_info": {"commit_id": "from-direct-url"}}'
+
+    monkeypatch.setattr(cli.importlib.metadata, "distribution", lambda name: _FakeDist())
+
+    assert cli._installed_commit() == "from-src-clone"
+
+
 def test_remote_head_commit_parses_git_ls_remote_output(monkeypatch):
     monkeypatch.setattr(
         cli.subprocess,

@@ -225,10 +225,13 @@ def _src_head_commit() -> str | None:
 
 
 def _installed_commit() -> str | None:
-    """The commit `omm` was actually installed from, read from pip's PEP 610
-    `direct_url.json` - present whenever pip installed from a VCS URL (i.e.
-    every real `pipx install`). None for editable/local-path dev installs,
-    which carry no vcs_info to compare against."""
+    """The commit omm is actually running from. Checks the persistent
+    editable clone (SRC_DIR) first, then falls back to pip's PEP 610
+    direct_url.json vcs_info - present for not-yet-migrated installs that
+    still used a plain `pipx install <git-URL>` VCS snapshot."""
+    src_commit = _src_head_commit()
+    if src_commit:
+        return src_commit
     try:
         raw = importlib.metadata.distribution("omm").read_text("direct_url.json")
     except importlib.metadata.PackageNotFoundError:
