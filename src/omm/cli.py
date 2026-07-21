@@ -1697,9 +1697,35 @@ def benchmark_cmd(
     console.print(table)
     console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
     console.print(
-        "[dim]No generated text or raw hardware names were stored or uploaded. "
-        "This small smoke pack is not a leaderboard.[/dim]"
+        "[dim]No generated text or raw hardware names are ever stored - only "
+        "aggregate numbers may be shared below. Not a leaderboard.[/dim]"
     )
+    if _resolve_upload_decision(
+        "Send these benchmark results to the server to help train the recommendation model?"
+    ):
+        registry_entries = registry.load_registry()
+        for model in report["models"]:
+            entry = next(
+                (e for e in registry_entries.values() if e.get("ollama_name") == model["tag"]),
+                None,
+            )
+            samples = model["speed"]["samples_tokens_per_sec"]
+            _report_telemetry(
+                model["tag"],
+                entry.get("repo_id") if entry else None,
+                model["speed"]["median_tokens_per_sec"],
+                size_bytes=model.get("size_bytes"),
+                sample_count=model["speed"]["runs"],
+                speed_min=min(samples),
+                speed_max=max(samples),
+                quality={
+                    "pack_id": report["pack"]["id"],
+                    "pack_version": report["pack"]["version"],
+                    "correct": model["quality"]["correct"],
+                    "total": model["quality"]["total"],
+                    "accuracy": model["quality"]["accuracy"],
+                },
+            )
     if json_output:
         console.print_json(data=report)
 
