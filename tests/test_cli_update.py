@@ -249,6 +249,38 @@ def test_remote_head_commit_returns_none_when_git_missing(monkeypatch):
     assert cli._remote_head_commit() is None
 
 
+def test_src_head_commit_returns_none_when_git_dir_missing(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "SRC_DIR", tmp_path / "src")
+
+    assert cli._src_head_commit() is None
+
+
+def test_src_head_commit_returns_head_when_git_dir_present(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    (src / ".git").mkdir(parents=True)
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="deadbeef123\n", stderr=""),
+    )
+
+    assert cli._src_head_commit() == "deadbeef123"
+
+
+def test_src_head_commit_returns_none_when_rev_parse_fails(monkeypatch, tmp_path):
+    src = tmp_path / "src"
+    (src / ".git").mkdir(parents=True)
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 128, stdout="", stderr="fatal: not a git repository"),
+    )
+
+    assert cli._src_head_commit() is None
+
+
 def test_run_pipx_install_advances_progress_on_known_stage_lines(monkeypatch):
     lines = [
         "creating virtual environment...\n",

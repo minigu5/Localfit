@@ -46,7 +46,7 @@ from omm import (
 )
 from omm import contribute as contribute_mod
 from omm.completion import complete_install_name, complete_remove_filename
-from omm.config import MODELS_DIR, load_config, save_config
+from omm.config import MODELS_DIR, OMM_HOME, load_config, save_config
 from omm.downloader import DownloadCancelled, DownloadError, download_file
 from omm.hardware import calculate_memory_budget, scan_hardware
 from omm.hashutil import sha256_file
@@ -199,6 +199,29 @@ def _refresh_data() -> None:
 
 
 _BARE_REPO_URL = REPO_URL.removeprefix("git+")
+
+SRC_DIR = OMM_HOME / "src"
+
+
+def _src_head_commit() -> str | None:
+    """HEAD commit of the persistent editable clone at SRC_DIR, if this
+    install has migrated to the git-pull update mechanism. None if not
+    migrated yet, or if the clone is missing/corrupted (triggers
+    self-healing re-migration in update())."""
+    if not (SRC_DIR / ".git").exists():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(SRC_DIR), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
 
 
 def _installed_commit() -> str | None:
