@@ -18,16 +18,16 @@ class _FakeProc:
         return self._returncode
 
 
-def test_install_spec_uses_bare_repo_url_on_darwin(monkeypatch):
+def test_install_spec_points_at_src_dir_on_darwin(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
 
-    assert cli._install_spec() == cli.REPO_URL
+    assert cli._install_spec() == str(cli.SRC_DIR)
 
 
 def test_install_spec_adds_nvidia_extra_on_non_darwin(monkeypatch):
     monkeypatch.setattr(cli.platform, "system", lambda: "Linux")
 
-    assert cli._install_spec() == f"omm[nvidia] @ {cli.REPO_URL}"
+    assert cli._install_spec() == f"{cli.SRC_DIR}[nvidia]"
 
 
 def test_update_reinstalls_via_pipx_then_refreshes_data(monkeypatch):

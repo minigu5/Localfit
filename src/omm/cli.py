@@ -130,10 +130,11 @@ def help_cmd(
 def _install_spec() -> str:
     """NVIDIA VRAM detection is dead weight on Mac (no NVIDIA GPUs since
     2016) - only pull that extra in on other platforms, mirroring
-    install.sh."""
+    install.sh. Points at the persistent local clone (SRC_DIR) rather than
+    the git URL directly, since omm installs it --editable."""
     if platform.system() == "Darwin":
-        return REPO_URL
-    return f"omm[nvidia] @ {REPO_URL}"
+        return str(SRC_DIR)
+    return f"{SRC_DIR}[nvidia]"
 
 
 @app.command()
