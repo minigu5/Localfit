@@ -10,7 +10,7 @@ def test_catalog_trust_saves_verified_public_key(isolated_omm_home, monkeypatch)
 
     result = runner.invoke(
         cli.app,
-        ["catalog-trust", "--manifest-url", "https://example.com/manifest.json", "--public-key", "key"],
+        ["setting", "catalog-trust", "--manifest-url", "https://example.com/manifest.json", "--public-key", "key"],
     )
 
     assert result.exit_code == 0, result.stdout

@@ -6,7 +6,7 @@ runner = CliRunner()
 
 
 def test_telemetry_requires_explicit_endpoint_before_opt_in(isolated_omm_home):
-    result = runner.invoke(cli.app, ["telemetry", "--enable"])
+    result = runner.invoke(cli.app, ["setting", "telemetry", "--enable"])
 
     assert result.exit_code == 1
     assert config.load_config()["telemetry_opt_in"] is False
@@ -16,6 +16,7 @@ def test_telemetry_accepts_local_self_hosted_endpoint(isolated_omm_home):
     result = runner.invoke(
         cli.app,
         [
+            "setting",
             "telemetry",
             "--endpoint",
             "http://127.0.0.1:8000/v1/benchmarks",

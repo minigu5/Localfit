@@ -30,8 +30,9 @@ omm upgrade          # Check every installed model for updates
 omm link             # Re-verify and repair every installed model's LM Studio/Ollama links
 omm link <directory> # Reuse central GGUF files in another app without copying them
 omm calibrate        # Locally correct predicted speed with an installed Ollama model
-omm ui compact       # Use short everyday tables (`omm ui detailed` for diagnostics)
-omm catalog-status   # Show signed recommendation data and rollback snapshots
+omm setting          # Interactive menu for UI mode, telemetry, and catalog trust
+omm setting ui compact       # Use short everyday tables (`detailed` for diagnostics)
+omm setting catalog-status   # Show signed recommendation data and rollback snapshots
 omm autoremove       # Clean up broken symlinks and orphaned partial downloads
 omm update           # Reinstall omm from the latest source, then refresh rules/model data
 omm help [command]   # Show help, same as --help
@@ -66,7 +67,7 @@ localfit-server
 Explicitly configure the endpoint and opt in before uploading:
 
 ```sh
-omm telemetry --endpoint http://127.0.0.1:8000/v1/benchmarks --enable
+omm setting telemetry --endpoint http://127.0.0.1:8000/v1/benchmarks --enable
 ```
 
 Training can consume the authenticated export directly:
@@ -82,10 +83,10 @@ Exact duplicate events are ignored, and raw export requires the admin token.
 
 ## Signed recommendation data
 
-`omm catalog-trust --manifest-url <https-url> --public-key <base64-key>` enables
-Ed25519 verification for future recommendation downloads. Existing artifacts are
-snapshotted before replacement and `omm catalog-rollback` restores the most recent
-different snapshot.
+`omm setting catalog-trust --manifest-url <https-url> --public-key <base64-key>`
+enables Ed25519 verification for future recommendation downloads. Existing
+artifacts are snapshotted before replacement and `omm setting catalog-rollback`
+restores the most recent different snapshot.
 
 ## Development
 

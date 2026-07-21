@@ -6,7 +6,7 @@ runner = CliRunner()
 
 
 def test_ui_mode_can_switch_to_detailed(isolated_omm_home):
-    result = runner.invoke(cli.app, ["ui", "detailed"])
+    result = runner.invoke(cli.app, ["setting", "ui", "detailed"])
 
     assert result.exit_code == 0, result.stdout
     assert config.load_config()["ui_mode"] == "detailed"

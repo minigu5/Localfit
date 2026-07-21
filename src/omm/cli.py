@@ -65,6 +65,12 @@ app = typer.Typer(
     name="omm",
     help="Open source Model Manager - package manager for local LLMs (GGUF).",
 )
+setting_app = typer.Typer(
+    name="setting",
+    help="View or change omm settings (UI mode, telemetry, catalog trust).",
+    invoke_without_command=True,
+)
+app.add_typer(setting_app)
 console = Console()
 
 REPO_URL = "git+https://github.com/minigu5/Localfit.git"
@@ -1114,7 +1120,7 @@ def list_models() -> None:
     session_cache.record_results(list(reg.keys()))
 
 
-@app.command(name="ui")
+@setting_app.command(name="ui")
 def configure_ui(
     mode: str = typer.Argument(None, help="compact or detailed"),
 ) -> None:
@@ -1129,7 +1135,7 @@ def configure_ui(
     console.print(f"UI mode: [cyan]{current.get('ui_mode', 'compact')}[/cyan]")
 
 
-@app.command(name="telemetry")
+@setting_app.command(name="telemetry")
 def configure_telemetry(
     endpoint: str = typer.Option(
         None,
@@ -1241,7 +1247,7 @@ def calibrate(
     console.print("[dim]The calibration stays in ~/.omm and was not uploaded.[/dim]")
 
 
-@app.command(name="catalog-trust")
+@setting_app.command(name="catalog-trust")
 def catalog_trust(
     manifest_url: str = typer.Option(..., "--manifest-url", help="HTTPS manifest URL."),
     public_key: str = typer.Option(..., "--public-key", help="Base64 Ed25519 public key."),
@@ -1262,7 +1268,7 @@ def catalog_trust(
     console.print(f"[green]Signed catalog verification enabled (key {fingerprint}).[/green]")
 
 
-@app.command(name="catalog-status")
+@setting_app.command(name="catalog-status")
 def catalog_status() -> None:
     """Show recommendation-catalog trust and rollback state."""
     current = load_config()
@@ -1282,7 +1288,7 @@ def catalog_status() -> None:
     console.print(table)
 
 
-@app.command(name="catalog-rollback")
+@setting_app.command(name="catalog-rollback")
 def catalog_rollback() -> None:
     """Restore the most recent different recommendation snapshot."""
     try:
@@ -1291,6 +1297,65 @@ def catalog_rollback() -> None:
         console.print(f"[red]Catalog rollback failed: {error}[/red]")
         raise typer.Exit(1) from error
     console.print(f"[green]Rolled back recommendation catalog from {selected.name}.[/green]")
+
+
+@setting_app.callback(invoke_without_command=True)
+def setting_menu(ctx: typer.Context) -> None:
+    """Bare `omm setting` opens an interactive menu; a subcommand skips it."""
+    if ctx.invoked_subcommand is not None:
+        return
+    while True:
+        choice = _ask_select(
+            questionary.select(
+                "What do you want to change?",
+                choices=[
+                    questionary.Choice("UI mode", value="ui"),
+                    questionary.Choice("Telemetry", value="telemetry"),
+                    questionary.Choice("Catalog trust", value="catalog-trust"),
+                    questionary.Choice("Catalog status", value="catalog-status"),
+                    questionary.Choice("Catalog rollback", value="catalog-rollback"),
+                ],
+            )
+        )
+        if choice is None:
+            return
+
+        if choice == "ui":
+            mode = _ask_select(
+                questionary.select("UI mode:", choices=["compact", "detailed"])
+            )
+            if mode is not None:
+                configure_ui(mode)
+        elif choice == "telemetry":
+            endpoint = questionary.text(
+                "Endpoint (blank to keep current, 'none' to clear):"
+            ).ask()
+            action = _ask_select(
+                questionary.select(
+                    "Uploads:",
+                    choices=[
+                        questionary.Choice("Enable", value="enable"),
+                        questionary.Choice("Disable", value="disable"),
+                        questionary.Choice("Leave unchanged", value="skip"),
+                    ],
+                )
+            )
+            if action is not None:
+                configure_telemetry(
+                    endpoint=endpoint or None,
+                    enable=(action == "enable"),
+                    disable=(action == "disable"),
+                )
+        elif choice == "catalog-trust":
+            manifest_url = questionary.text("Signed manifest URL (https://...):").ask()
+            public_key = questionary.text("Base64 Ed25519 public key:").ask()
+            if manifest_url and public_key:
+                catalog_trust(manifest_url=manifest_url, public_key=public_key)
+        elif choice == "catalog-status":
+            catalog_status()
+        elif choice == "catalog-rollback":
+            if _ask_confirm("Roll back the recommendation catalog?"):
+                catalog_rollback()
 
 
 @app.command()
