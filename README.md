@@ -18,7 +18,7 @@ Requirements: Python 3.10+. GPU detection extras (`omm[nvidia]`) are installed a
 omm scan             # Print a hardware summary (RAM, VRAM, OS)
 omm recommend        # Suggest a model that fits this machine, then offer to install it
 omm tune <name>      # Recommend context, GPU offload, threads, and batch size
-omm quality-eval qwen3:4b exaone3.5:2.4b  # Local quality + speed smoke evidence
+omm benchmark qwen3:4b exaone3.5:2.4b  # Local quality + speed smoke evidence
 omm search <query>   # Search curated models, cached candidates, and HuggingFace
 omm install <name>   # Download a model and link it into LM Studio / Ollama
 omm uninstall <name> # Uninstall a model and clean up its symlinks/manifests
@@ -46,7 +46,7 @@ scan subtracts memory currently used by other applications, keeps at least
 caps. Recommendation fit and `omm tune` use this safe budget, so rerunning a
 command adapts after memory-heavy applications are opened or closed.
 
-`omm quality-eval` runs a versioned eight-item bilingual arithmetic smoke pack
+`omm benchmark` runs a versioned eight-item bilingual arithmetic smoke pack
 against models already installed in Ollama. It stores parsed answers,
 correctness, pinned model metadata, and fixed-length timings under
 `~/.omm/evaluations/`; it stores no generated text or raw hardware names and

@@ -41,7 +41,7 @@ def test_quality_eval_saves_local_report_and_never_uploads(isolated_omm_home, mo
     }
     monkeypatch.setattr(cli.quality_mod, "collect_evidence", lambda *args, **kwargs: report)
 
-    result = runner.invoke(cli.app, ["quality-eval", "small:latest"])
+    result = runner.invoke(cli.app, ["benchmark", "small:latest"])
 
     assert result.exit_code == 0, result.stdout
     assert "6/8 (75.0%)" in result.stdout
@@ -52,10 +52,10 @@ def test_quality_eval_saves_local_report_and_never_uploads(isolated_omm_home, mo
     assert "not a leaderboard" in result.stdout
 
 
-def test_quality_eval_stops_when_ollama_is_not_running(isolated_omm_home, monkeypatch):
+def test_benchmark_stops_when_ollama_is_not_running(isolated_omm_home, monkeypatch):
     monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: False)
 
-    result = runner.invoke(cli.app, ["quality-eval", "small:latest"])
+    result = runner.invoke(cli.app, ["benchmark", "small:latest"])
 
     assert result.exit_code == 1
     assert "Ollama is not running" in result.stdout

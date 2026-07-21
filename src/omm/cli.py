@@ -1634,8 +1634,8 @@ def autoremove() -> None:
     )
 
 
-@app.command(name="quality-eval")
-def quality_eval_cmd(
+@app.command(name="benchmark")
+def benchmark_cmd(
     models: list[str] = typer.Argument(
         ...,
         help="One or more already-installed Ollama tags.",
