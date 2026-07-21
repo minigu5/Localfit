@@ -3,15 +3,8 @@
 # Usage: curl -fsSL https://raw.githubusercontent.com/minigu5/Localfit/main/install.sh | sh
 set -eu
 
-REPO_URL="git+https://github.com/minigu5/Localfit.git"
-
-# NVIDIA VRAM detection is dead weight on Mac (no NVIDIA GPUs since 2016) -
-# only pull that extra in on other platforms.
-if [ "$(uname -s)" = "Darwin" ]; then
-    INSTALL_SPEC="$REPO_URL"
-else
-    INSTALL_SPEC="omm[nvidia] @ $REPO_URL"
-fi
+REPO_URL="https://github.com/minigu5/Localfit.git"
+SRC_DIR="$HOME/.omm/src"
 
 # run_apt() runs as root directly, or via sudo if available and needed -
 # bare Docker containers are usually root already (no sudo binary at all).
@@ -41,9 +34,9 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 1
 fi
 
-# INSTALL_SPEC points pip at a git+https URL, so pip needs the actual `git`
-# binary to clone it - bare Debian/Ubuntu images (and Docker's official
-# `python` images) don't ship it by default.
+# omm is installed from a local git clone (below), so we need the actual
+# `git` binary - bare Debian/Ubuntu images (and Docker's official `python`
+# images) don't ship it by default.
 if ! command -v git >/dev/null 2>&1 && command -v apt-get >/dev/null 2>&1; then
     echo "git not found, installing it via apt..."
     run_apt update -qq && run_apt install -y --no-install-recommends git ca-certificates || true
@@ -100,8 +93,20 @@ if ! command -v pipx >/dev/null 2>&1 && ! python3 -m pipx --version >/dev/null 2
     run_pipx ensurepath
 fi
 
-echo "Installing omm from $REPO_URL ..."
-run_pipx install --force "$INSTALL_SPEC"
+echo "Cloning omm source to $SRC_DIR ..."
+rm -rf "$SRC_DIR"
+git clone --filter=blob:none --quiet "$REPO_URL" "$SRC_DIR"
+
+# NVIDIA VRAM detection is dead weight on Mac (no NVIDIA GPUs since 2016) -
+# only pull that extra in on other platforms.
+if [ "$(uname -s)" = "Darwin" ]; then
+    INSTALL_SPEC="$SRC_DIR"
+else
+    INSTALL_SPEC="$SRC_DIR[nvidia]"
+fi
+
+echo "Installing omm (editable) from $SRC_DIR ..."
+run_pipx install --force --editable "$INSTALL_SPEC"
 
 # `pipx ensurepath` (via the `userpath` package) writes the PATH line to
 # ~/.profile, which login shells source but plain interactive shells don't
