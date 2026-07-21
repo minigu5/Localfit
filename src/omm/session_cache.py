@@ -25,7 +25,8 @@ def _session_path() -> Path | None:
     # fd 0 itself is a real tty.
     try:
         tty = os.ttyname(0)
-    except OSError:
+    except (OSError, AttributeError):
+        # AttributeError: os.ttyname doesn't exist on Windows at all.
         return None
     digest = hashlib.sha1(tty.encode()).hexdigest()
     return config.OMM_HOME / "session" / f"{digest}.json"

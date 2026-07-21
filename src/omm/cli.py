@@ -1642,7 +1642,8 @@ class _EscListener:
             import os
 
             os.ttyname(0)
-        except OSError:
+        except (OSError, AttributeError):
+            # AttributeError: os.ttyname doesn't exist on Windows at all.
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()

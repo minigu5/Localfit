@@ -2,14 +2,15 @@ from omm import session_cache
 
 
 def _fake_tty(monkeypatch, name="/dev/faketty0"):
-    monkeypatch.setattr(session_cache.os, "ttyname", lambda fd: name)
+    # raising=False: os.ttyname doesn't exist as an attribute on Windows.
+    monkeypatch.setattr(session_cache.os, "ttyname", lambda fd: name, raising=False)
 
 
 def _no_tty(monkeypatch):
     def _raise(fd):
         raise OSError("not a tty")
 
-    monkeypatch.setattr(session_cache.os, "ttyname", _raise)
+    monkeypatch.setattr(session_cache.os, "ttyname", _raise, raising=False)
 
 
 def test_record_and_load_seen_roundtrips(isolated_omm_home, monkeypatch):
