@@ -6,6 +6,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from omm.atomic import atomic_write_text, backup_corrupt_file, locked
+
 OMM_HOME = Path.home() / ".omm"
 MODELS_DIR = OMM_HOME / "models"
 CONFIG_PATH = OMM_HOME / "config.json"
@@ -13,14 +15,25 @@ REGISTRY_PATH = OMM_HOME / "models.json"
 RULES_PATH = OMM_HOME / "rules.json"
 RECOMMEND_MODEL_PATH = OMM_HOME / "recommend-model.json"
 EVALUATIONS_DIR = OMM_HOME / "evaluations"
+CALIBRATION_PATH = OMM_HOME / "calibration.json"
+CATALOG_HISTORY_DIR = OMM_HOME / "catalog-history"
+LEGACY_FIREBASE_ENDPOINT = (
+    "https://localfit-8ab57-default-rtdb.firebaseio.com/telemetry.json"
+)
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "telemetry_opt_in": False,
-    "telemetry_endpoint": "https://localfit-8ab57-default-rtdb.firebaseio.com/telemetry.json",
+    # Local-only by default. Teams may configure the bundled FastAPI server;
+    # Firebase remains an explicit legacy compatibility option.
+    "telemetry_endpoint": None,
+    "telemetry_backend": "local",
     "rules_url": None,
     "model_url": "https://raw.githubusercontent.com/minigu5/Localfit/main/published/recommend-model.json",
     "default_engine": None,
     "external_scan_done": False,
+    "catalog_manifest_url": None,
+    "catalog_public_key": None,
+    "ui_mode": "compact",
 }
 
 
@@ -28,15 +41,57 @@ def ensure_omm_home() -> None:
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _merge_config(data: dict[str, Any]) -> dict[str, Any]:
+    merged = {**DEFAULT_CONFIG, **data}
+    if "telemetry_backend" not in data:
+        endpoint = data.get("telemetry_endpoint")
+        if endpoint == LEGACY_FIREBASE_ENDPOINT and not data.get("telemetry_opt_in"):
+            merged["telemetry_endpoint"] = None
+            merged["telemetry_backend"] = "local"
+        elif isinstance(endpoint, str) and "firebaseio.com" in endpoint:
+            merged["telemetry_backend"] = "firebase_legacy"
+        elif endpoint:
+            merged["telemetry_backend"] = "self_hosted"
+    return merged
+
+
 def load_config() -> dict[str, Any]:
     ensure_omm_home()
     if not CONFIG_PATH.exists():
         save_config(DEFAULT_CONFIG)
         return dict(DEFAULT_CONFIG)
-    data = json.loads(CONFIG_PATH.read_text())
-    return {**DEFAULT_CONFIG, **data}
+    try:
+        data = json.loads(CONFIG_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        backup_corrupt_file(CONFIG_PATH)
+        return dict(DEFAULT_CONFIG)
+    if not isinstance(data, dict):
+        backup_corrupt_file(CONFIG_PATH)
+        return dict(DEFAULT_CONFIG)
+    return _merge_config(data)
 
 
 def save_config(config: dict[str, Any]) -> None:
     ensure_omm_home()
-    CONFIG_PATH.write_text(json.dumps(config, indent=2))
+    with locked(CONFIG_PATH):
+        atomic_write_text(CONFIG_PATH, json.dumps(config, indent=2) + "\n")
+
+
+def update_config(**changes: Any) -> dict[str, Any]:
+    """Merge a small update while serializing the complete read/write cycle."""
+    ensure_omm_home()
+    with locked(CONFIG_PATH):
+        data: dict[str, Any] = {}
+        if CONFIG_PATH.exists():
+            try:
+                loaded = json.loads(CONFIG_PATH.read_text())
+                if isinstance(loaded, dict):
+                    data = loaded
+                else:
+                    backup_corrupt_file(CONFIG_PATH)
+            except (OSError, json.JSONDecodeError):
+                backup_corrupt_file(CONFIG_PATH)
+        current = _merge_config(data)
+        current.update(changes)
+        atomic_write_text(CONFIG_PATH, json.dumps(current, indent=2) + "\n")
+    return current

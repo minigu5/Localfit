@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -21,6 +22,17 @@ from omm.config import load_config
 
 _MAX_LOG_LINES = 500
 _DEFAULT_MAX_RETRIES_PER_FLUSH = 3
+
+
+def secure_endpoint(endpoint: str) -> bool:
+    """Allow HTTPS, plus HTTP only for a local self-hosted collector."""
+    try:
+        parsed = urlparse(endpoint)
+    except ValueError:
+        return False
+    if parsed.scheme == "https" and parsed.hostname:
+        return True
+    return parsed.scheme == "http" and parsed.hostname in {"127.0.0.1", "localhost", "::1"}
 
 
 def _log_path():
@@ -70,7 +82,7 @@ def _post_event(event: dict[str, Any]) -> bool:
     a 2xx response, False otherwise (network error, bad status, or no
     endpoint configured)."""
     endpoint = load_config().get("telemetry_endpoint")
-    if not endpoint:
+    if not isinstance(endpoint, str) or not secure_endpoint(endpoint):
         log_attempt("skipped_no_endpoint")
         return False
     try:

@@ -29,6 +29,8 @@ from rich.table import Table
 from omm import (
     benchmark,
     benchmark_history,
+    calibration,
+    catalog,
     config as config_mod,
     linker,
     predictor,
@@ -54,6 +56,7 @@ from omm.hub import (
     ModelResolutionError,
     ResolvedModel,
     rank_quant_variants,
+    remote_file_size,
     remote_file_sha256,
     resolve_model,
 )
@@ -65,6 +68,16 @@ app = typer.Typer(
 console = Console()
 
 REPO_URL = "git+https://github.com/minigu5/Localfit.git"
+
+
+def _load_recommendation_with_change_note(config: dict) -> tuple[dict | None, bool]:
+    manifest_url = config.get("catalog_manifest_url")
+    public_key = config.get("catalog_public_key")
+    if manifest_url and public_key:
+        return predictor.load_model_with_change_note(
+            config.get("model_url"), manifest_url, public_key
+        )
+    return predictor.load_model_with_change_note(config.get("model_url"))
 
 
 def _omm_version() -> str:
@@ -165,7 +178,12 @@ def _refresh_data() -> None:
     model_url = config.get("model_url")
     if model_url:
         try:
-            artifact = predictor.fetch_and_cache_model(model_url)
+            manifest_url = config.get("catalog_manifest_url")
+            public_key = config.get("catalog_public_key")
+            if manifest_url and public_key:
+                artifact = predictor.fetch_and_cache_model(model_url, manifest_url, public_key)
+            else:
+                artifact = predictor.fetch_and_cache_model(model_url)
             console.print(
                 f"[green]Updated recommend-model.json "
                 f"({len(artifact.get('candidates', []))} candidates) from {model_url}[/green]"
@@ -439,7 +457,7 @@ def recommend() -> None:
     info = scan_hardware()
     config = load_config()
 
-    artifact, changed = predictor.load_model_with_change_note(config.get("model_url"))
+    artifact, changed = _load_recommendation_with_change_note(config)
     if changed:
         console.print("[dim]Fetched updated recommendation data from GitHub.[/dim]")
     if artifact and artifact.get("candidates"):
@@ -587,14 +605,35 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     and let the user pick one, cursor defaulted to the best-fitting, highest
     quality option."""
     info = scan_hardware()
-    has_gpu = info.vram_total_gb is not None
-    available_gb = info.vram_total_gb if has_gpu else info.ram_total_gb
+    available_gb = calculate_memory_budget(info).model_budget_gb
 
     variants = rank_quant_variants(error.candidates, available_gb, error.param_count_b)
+    resolved_variants = []
+    for variant in variants:
+        if variant.required_gb is not None:
+            resolved_variants.append(variant)
+            continue
+        size_bytes = remote_file_size(error.repo_id, variant.filename)
+        if size_bytes is None:
+            resolved_variants.append(variant)
+            continue
+        required_gb = size_bytes / (1024**3) * 1.2
+        resolved_variants.append(
+            type(variant)(
+                filename=variant.filename,
+                quant_bits=variant.quant_bits,
+                required_gb=required_gb,
+                fits=required_gb <= available_gb,
+            )
+        )
+    variants = sorted(
+        resolved_variants,
+        key=lambda variant: (variant.fits is not True, -(variant.quant_bits or 0)),
+    )
     choices = []
     for v in variants:
         if v.fits is True:
-            note = f"fits, ~{v.required_gb:.1f}GB needed"
+            note = f"✓ fits, ~{v.required_gb:.1f}GB needed"
         elif v.fits is False:
             note = f"may not fit, ~{v.required_gb:.1f}GB needed (you have {available_gb:.1f}GB)"
         else:
@@ -705,7 +744,8 @@ def _install_impl(
     trees = artifact.get("trees") if artifact else None
     if trees is not None:
         hw = scan_hardware()
-        speed = predictor.predict_speed(trees, hw, {"repo_id": repo_id, "filename": filename})
+        candidate = {"repo_id": repo_id, "filename": filename}
+        speed = predictor.predict_speed(trees, hw, candidate)
         if speed <= 0:
             console.print(
                 f"[red]Warning: this hardware is predicted not to run {filename}.[/red]"
@@ -715,6 +755,15 @@ def _install_impl(
             if not _ask_confirm("Install anyway?"):
                 console.print("[yellow]Cancelled.[/yellow]")
                 raise typer.Exit(0)
+        else:
+            try:
+                _, speed_low, speed_high = predictor.predict_speed_interval(trees, hw, candidate)
+            except (ValueError, KeyError, TypeError, IndexError):
+                speed_low = speed_high = speed
+            console.print(
+                f"[dim]Predicted speed: {speed:.1f} tok/s "
+                f"(range {speed_low:.1f}–{speed_high:.1f}).[/dim]"
+            )
 
     dest = MODELS_DIR / filename
     if dest.exists():
@@ -1034,21 +1083,214 @@ def list_models() -> None:
     table.add_column("#", justify="right")
     table.add_column("Filename", style="cyan")
     table.add_column("Size", justify="right")
-    table.add_column("LM Studio")
-    table.add_column("Ollama")
+    detailed = load_config().get("ui_mode") == "detailed"
+    if detailed:
+        table.add_column("LM Studio")
+        table.add_column("Ollama")
+    else:
+        table.add_column("Links")
 
     for idx, (filename, entry) in enumerate(reg.items(), start=1):
         size_gb = entry.get("size_bytes", 0) / (1024**3)
         linked = entry.get("linked", {})
-        table.add_row(
-            str(idx),
-            filename,
-            f"{size_gb:.2f} GB",
-            "[green]yes[/green]" if linked.get("lmstudio") else "no",
-            "[green]yes[/green]" if linked.get("ollama") else "no",
-        )
+        if detailed:
+            table.add_row(
+                str(idx),
+                filename,
+                f"{size_gb:.2f} GB",
+                "[green]yes[/green]" if linked.get("lmstudio") else "no",
+                "[green]yes[/green]" if linked.get("ollama") else "no",
+            )
+        else:
+            programs = [
+                label
+                for key, label in (("lmstudio", "LM Studio"), ("ollama", "Ollama"))
+                if linked.get(key)
+            ]
+            table.add_row(
+                str(idx), filename, f"{size_gb:.2f} GB", ", ".join(programs) or "none"
+            )
     console.print(table)
     session_cache.record_results(list(reg.keys()))
+
+
+@app.command(name="ui")
+def configure_ui(
+    mode: str = typer.Argument(None, help="compact or detailed"),
+) -> None:
+    """Choose compact everyday tables or detailed per-engine columns."""
+    current = load_config()
+    if mode is not None:
+        normalized = mode.lower()
+        if normalized not in {"compact", "detailed"}:
+            console.print("[red]UI mode must be compact or detailed.[/red]")
+            raise typer.Exit(1)
+        current = config_mod.update_config(ui_mode=normalized)
+    console.print(f"UI mode: [cyan]{current.get('ui_mode', 'compact')}[/cyan]")
+
+
+@app.command(name="telemetry")
+def configure_telemetry(
+    endpoint: str = typer.Option(
+        None,
+        "--endpoint",
+        help="Self-hosted HTTPS endpoint, localhost URL, or 'none' to clear it.",
+    ),
+    enable: bool = typer.Option(False, "--enable", help="Allow benchmark uploads."),
+    disable: bool = typer.Option(False, "--disable", help="Keep benchmarks local only."),
+) -> None:
+    """Configure optional uploads; the default remains local-only."""
+    if enable and disable:
+        console.print("[red]Choose only one of --enable or --disable.[/red]")
+        raise typer.Exit(1)
+    current = load_config()
+    changes = {}
+    if endpoint is not None:
+        if endpoint.lower() == "none":
+            changes.update(telemetry_endpoint=None, telemetry_backend="local")
+        elif not telemetry.secure_endpoint(endpoint):
+            console.print("[red]Use HTTPS, or HTTP only for localhost.[/red]")
+            raise typer.Exit(1)
+        else:
+            changes.update(
+                telemetry_endpoint=endpoint,
+                telemetry_backend=(
+                    "firebase_legacy" if "firebaseio.com" in endpoint else "self_hosted"
+                ),
+            )
+    prospective_endpoint = changes.get("telemetry_endpoint", current.get("telemetry_endpoint"))
+    if enable:
+        if not prospective_endpoint:
+            console.print("[red]Set --endpoint before enabling uploads.[/red]")
+            raise typer.Exit(1)
+        changes["telemetry_opt_in"] = True
+    elif disable:
+        changes["telemetry_opt_in"] = False
+    if changes:
+        current = config_mod.update_config(**changes)
+    table = Table(title="Benchmark data policy", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Uploads", "enabled" if current.get("telemetry_opt_in") else "disabled")
+    table.add_row("Backend", str(current.get("telemetry_backend") or "local"))
+    table.add_row("Endpoint", str(current.get("telemetry_endpoint") or "not configured"))
+    console.print(table)
+
+
+@app.command()
+def calibrate(
+    model_name: str = typer.Argument(
+        None,
+        help="Installed Ollama-linked model; defaults to the smallest available model.",
+    ),
+) -> None:
+    """Correct this machine's local speed estimate without uploading data."""
+    reg = registry.load_registry()
+    eligible = [
+        (filename, entry)
+        for filename, entry in reg.items()
+        if (entry.get("linked") or {}).get("ollama")
+    ]
+    if not eligible:
+        console.print("[red]No Ollama-linked omm models are installed.[/red]")
+        raise typer.Exit(1)
+    if model_name is None:
+        filename, entry = min(eligible, key=lambda item: item[1].get("size_bytes") or 2**63)
+    else:
+        resolved = _resolve_ref(model_name)
+        filename, entry = _lookup_entry(resolved, reg)
+        if entry is None or not (entry.get("linked") or {}).get("ollama"):
+            console.print(f"[red]{resolved} is not linked to Ollama.[/red]")
+            raise typer.Exit(1)
+
+    artifact = predictor.load_cached_model()
+    if not artifact or not artifact.get("trees"):
+        console.print("[red]No cached recommendation model is available.[/red]")
+        raise typer.Exit(1)
+    hardware = scan_hardware()
+    candidate = {
+        "repo_id": entry.get("repo_id"),
+        "filename": filename,
+        "size_bytes": entry.get("size_bytes"),
+    }
+    predicted, _, _ = predictor.predict_speed_interval(
+        artifact["trees"],
+        hardware,
+        candidate,
+        engine="ollama",
+        apply_calibration=False,
+    )
+    if predicted <= 0:
+        console.print("[red]This model has no usable baseline speed prediction.[/red]")
+        raise typer.Exit(1)
+    tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
+    measured = benchmark.benchmark_ollama(tag)
+    if measured is None or measured <= 0:
+        console.print("[red]Calibration requires a running Ollama model server.[/red]")
+        raise typer.Exit(1)
+    factor = calibration.record_calibration(
+        hardware,
+        measured_tokens_per_sec=measured,
+        predicted_tokens_per_sec=predicted,
+        engine="ollama",
+    )
+    console.print(
+        f"[green]Local calibration saved: {measured:.1f} tok/s measured, "
+        f"{predicted:.1f} predicted, correction ×{factor:.2f}.[/green]"
+    )
+    console.print("[dim]The calibration stays in ~/.omm and was not uploaded.[/dim]")
+
+
+@app.command(name="catalog-trust")
+def catalog_trust(
+    manifest_url: str = typer.Option(..., "--manifest-url", help="HTTPS manifest URL."),
+    public_key: str = typer.Option(..., "--public-key", help="Base64 Ed25519 public key."),
+) -> None:
+    """Require future recommendation downloads to pass signature verification."""
+    if not manifest_url.startswith("https://"):
+        console.print("[red]The signed catalog manifest must use HTTPS.[/red]")
+        raise typer.Exit(1)
+    try:
+        fingerprint = catalog.public_key_fingerprint(public_key)
+    except catalog.CatalogVerificationError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(1) from error
+    config_mod.update_config(
+        catalog_manifest_url=manifest_url,
+        catalog_public_key=public_key,
+    )
+    console.print(f"[green]Signed catalog verification enabled (key {fingerprint}).[/green]")
+
+
+@app.command(name="catalog-status")
+def catalog_status() -> None:
+    """Show recommendation-catalog trust and rollback state."""
+    current = load_config()
+    public_key = current.get("catalog_public_key")
+    fingerprint = "not configured"
+    if isinstance(public_key, str):
+        try:
+            fingerprint = catalog.public_key_fingerprint(public_key)
+        except catalog.CatalogVerificationError:
+            fingerprint = "invalid"
+    table = Table(title="Recommendation catalog", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Signed manifest", str(current.get("catalog_manifest_url") or "not configured"))
+    table.add_row("Trusted key", fingerprint)
+    table.add_row("Rollback snapshots", str(len(catalog.snapshots())))
+    console.print(table)
+
+
+@app.command(name="catalog-rollback")
+def catalog_rollback() -> None:
+    """Restore the most recent different recommendation snapshot."""
+    try:
+        selected = catalog.rollback()
+    except (OSError, ValueError) as error:
+        console.print(f"[red]Catalog rollback failed: {error}[/red]")
+        raise typer.Exit(1) from error
+    console.print(f"[green]Rolled back recommendation catalog from {selected.name}.[/green]")
 
 
 @app.command()
@@ -1121,17 +1363,51 @@ def _print_install_suggestions(query: str) -> None:
         console.print(f"  - {search_mod.install_ref(s)}")
 
 
-@app.command()
-def relink() -> None:
-    """Re-verify every installed model's LM Studio/Ollama links and repair
+@app.command(name="link")
+def link_models(
+    directory: Path = typer.Argument(
+        None,
+        help="Optional model directory for an unsupported local AI app.",
+    ),
+) -> None:
+    """Link models into an arbitrary directory or repair known app links.
+
+    Without a directory, re-verify every installed model's LM Studio/Ollama links and repair
     them. Covers models that were never linked *and* ones whose link is now
     broken, missing, or stale - link_lmstudio/link_ollama always replace the
     existing symlink/manifest, so this always re-links rather than trusting
-    the registry's stored `linked` flag."""
+    the registry's stored `linked` flag. With a directory, reuse the central
+    GGUF through non-copying symlinks for another local application."""
     reg = registry.load_registry()
     if not reg:
         console.print("No models installed via omm yet.")
         raise typer.Exit(0)
+
+    if directory is not None:
+        directory = directory.expanduser()
+        directory.mkdir(parents=True, exist_ok=True)
+        linked_count = 0
+        skipped_missing = 0
+        for filename, entry in reg.items():
+            source = MODELS_DIR / filename
+            if not source.exists():
+                skipped_missing += 1
+                continue
+            try:
+                destination = linker.link_custom_directory(source, directory)
+            except linker.LinkError as error:
+                console.print(f"[yellow]{filename}: custom link skipped: {error}[/yellow]")
+                continue
+            custom_links = list(entry.get("custom_links") or [])
+            if str(destination) not in custom_links:
+                custom_links.append(str(destination))
+            registry.upsert_entry(filename, custom_links=custom_links)
+            linked_count += 1
+        console.print(
+            f"[green]{linked_count} model(s) linked into {directory}.[/green] "
+            f"{skipped_missing} skipped (file missing)."
+        )
+        return
 
     lmstudio_installed = linker.is_lmstudio_installed()
     ollama_installed = linker.is_ollama_installed()
@@ -1175,6 +1451,13 @@ def relink() -> None:
         f"[green]{relinked_count} model(s) relinked/verified.[/green] "
         f"{skipped_missing} skipped (file missing)."
     )
+
+
+@app.command(name="relink", hidden=True)
+def relink() -> None:
+    """Deprecated alias for `omm link`."""
+    console.print("[yellow]`omm relink` is deprecated; use `omm link`.[/yellow]")
+    link_models(directory=None)
 
 
 def _autoremove_incomplete_installs() -> int:
@@ -1299,18 +1582,23 @@ def _report_telemetry(filename: str, repo_id: str | None, tokens_per_sec: float 
         )
         return False
     info = scan_hardware()
+    model_file = MODELS_DIR / filename
     sent = telemetry.send_event(
         {
-            "os": info.os_name,
-            "cpu": info.cpu,
-            "gpu": info.gpu_name,
             "ram_gb": round(info.ram_total_gb, 1),
             "vram_gb": round(info.vram_total_gb, 1) if info.vram_total_gb is not None else None,
             "unified_memory": info.unified_memory,
+            "gpu_tflops": info.gpu_tflops,
             "model_installed": filename,
             "model_repo_id": repo_id,
+            "model_size_bytes": model_file.stat().st_size if model_file.exists() else None,
             "engine": "ollama",
+            "benchmark_version": 4,
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
             "tokens_per_sec": round(tokens_per_sec, 2),
+            "sample_count": 1,
+            "tokens_per_sec_min": round(tokens_per_sec, 2),
+            "tokens_per_sec_max": round(tokens_per_sec, 2),
         },
         force=True,
     )
@@ -1354,7 +1642,8 @@ class _EscListener:
             import os
 
             os.ttyname(0)
-        except OSError:
+        except (OSError, AttributeError):
+            # AttributeError: os.ttyname doesn't exist on Windows at all.
             return
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
@@ -1484,7 +1773,7 @@ def contribute() -> None:
         raise typer.Exit(1)
 
     config = load_config()
-    artifact, _ = predictor.load_model_with_change_note(config.get("model_url"))
+    artifact, _ = _load_recommendation_with_change_note(config)
     if not artifact or not artifact.get("candidates"):
         console.print(
             "[red]No trained recommendation model available - can't select candidates.[/red]"
@@ -1499,7 +1788,7 @@ def contribute() -> None:
     queue = contribute_mod.ContributionQueue(artifact, hw, history_refs)
 
     def refetch():
-        return predictor.load_model_with_change_note(config.get("model_url"))
+        return _load_recommendation_with_change_note(config)
 
     listener = _EscListener()
     listener.start()

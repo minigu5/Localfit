@@ -27,7 +27,11 @@ omm list             # Show models installed via omm and their linked status
 omm info <name>      # Show a model's name, version, size, and linked-program run commands
 omm upgrade <name>   # Refresh a model against its source if it has changed since install
 omm upgrade          # Check every installed model for updates
-omm relink           # Re-verify and repair every installed model's LM Studio/Ollama links
+omm link             # Re-verify and repair every installed model's LM Studio/Ollama links
+omm link <directory> # Reuse central GGUF files in another app without copying them
+omm calibrate        # Locally correct predicted speed with an installed Ollama model
+omm ui compact       # Use short everyday tables (`omm ui detailed` for diagnostics)
+omm catalog-status   # Show signed recommendation data and rollback snapshots
 omm autoremove       # Clean up broken symlinks and orphaned partial downloads
 omm update           # Reinstall omm from the latest source, then refresh rules/model data
 omm help [command]   # Show help, same as --help
@@ -46,6 +50,42 @@ against models already installed in Ollama. It stores parsed answers,
 correctness, pinned model metadata, and fixed-length timings under
 `~/.omm/evaluations/`; it stores no generated text or raw hardware names and
 never uploads. The pack is intentionally small and is not a leaderboard.
+
+## Self-hosted benchmark data
+
+Benchmark uploads are disabled and have no server endpoint by default. To run
+the bundled FastAPI + SQLite collector locally:
+
+```sh
+pip install -e ".[server]"
+export LOCALFIT_DB_PATH="$PWD/localfit.db"
+export LOCALFIT_ADMIN_TOKEN="replace-with-a-long-random-token"
+localfit-server
+```
+
+Explicitly configure the endpoint and opt in before uploading:
+
+```sh
+omm telemetry --endpoint http://127.0.0.1:8000/v1/benchmarks --enable
+```
+
+Training can consume the authenticated export directly:
+
+```sh
+export LOCALFIT_ADMIN_TOKEN="replace-with-a-long-random-token"
+python scripts/train_model.py \
+  --telemetry-url http://127.0.0.1:8000/v1/benchmarks/export
+```
+
+The old Firebase JSON endpoint remains supported only when explicitly configured.
+Exact duplicate events are ignored, and raw export requires the admin token.
+
+## Signed recommendation data
+
+`omm catalog-trust --manifest-url <https-url> --public-key <base64-key>` enables
+Ed25519 verification for future recommendation downloads. Existing artifacts are
+snapshotted before replacement and `omm catalog-rollback` restores the most recent
+different snapshot.
 
 ## Development
 

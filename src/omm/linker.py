@@ -92,6 +92,13 @@ def link_lmstudio(gguf_path: Path, repo_id: str | None) -> Path:
     return dst
 
 
+def link_custom_directory(gguf_path: Path, directory: Path) -> Path:
+    """Expose a central GGUF in an arbitrary local application's model directory."""
+    destination = directory.expanduser() / gguf_path.name
+    _symlink(gguf_path, destination)
+    return destination
+
+
 def unlink_lmstudio(filename: str, repo_id: str | None) -> None:
     publisher, repo = _lmstudio_publisher_repo(repo_id, filename)
     dst = lmstudio_models_dir() / publisher / repo / filename

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from omm import cli, config, predictor, registry, scan_import
+from omm import calibration, catalog, cli, config, predictor, registry, scan_import
 
 
 @pytest.fixture
@@ -21,11 +21,16 @@ def isolated_omm_home(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "RULES_PATH", home / "rules.json")
     monkeypatch.setattr(config, "RECOMMEND_MODEL_PATH", home / "recommend-model.json")
     monkeypatch.setattr(config, "EVALUATIONS_DIR", home / "evaluations")
+    monkeypatch.setattr(config, "CALIBRATION_PATH", home / "calibration.json")
+    monkeypatch.setattr(config, "CATALOG_HISTORY_DIR", home / "catalog-history")
 
     monkeypatch.setattr(registry, "REGISTRY_PATH", config.REGISTRY_PATH)
     monkeypatch.setattr(cli, "MODELS_DIR", models_dir)
     monkeypatch.setattr(scan_import, "MODELS_DIR", models_dir)
     monkeypatch.setattr(predictor, "RECOMMEND_MODEL_PATH", config.RECOMMEND_MODEL_PATH)
+    monkeypatch.setattr(calibration, "CALIBRATION_PATH", config.CALIBRATION_PATH)
+    monkeypatch.setattr(catalog, "RECOMMEND_MODEL_PATH", config.RECOMMEND_MODEL_PATH)
+    monkeypatch.setattr(catalog, "CATALOG_HISTORY_DIR", config.CATALOG_HISTORY_DIR)
 
     config.ensure_omm_home()
     return home

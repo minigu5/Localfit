@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "omm"
-version = "0.1.3"
+version = "0.1.5"
 description = "Open source Model Manager - a package manager for local LLMs (GGUF)"
 requires-python = ">=3.10"
 dependencies = [
@@ -13,10 +13,22 @@ dependencies = [
     "psutil>=5.9",
     "requests>=2.31",
     "questionary>=2.0",
+    "cryptography>=43",
+    "filelock>=3.16",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = [
+    "pytest>=8",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "uvicorn>=0.30",
+]
+server = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "uvicorn>=0.30",
+]
 # NVIDIA VRAM detection (hardware.py._scan_nvidia_vram already lazy-imports
 # pynvml behind a broad try/except, so it's safe to omit entirely on
 # machines without an NVIDIA GPU - e.g. every Mac).
@@ -24,9 +36,10 @@ nvidia = ["nvidia-ml-py>=12"]
 
 [project.scripts]
 omm = "omm.cli:app"
+localfit-server = "localfit_server.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/omm"]
+packages = ["src/omm", "src/localfit_server"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
