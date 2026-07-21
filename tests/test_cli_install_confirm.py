@@ -41,7 +41,7 @@ def test_install_runs_benchmark_and_telemetry_on_yes(isolated_omm_home, monkeypa
     assert sent[0][1] is True
 
 
-def test_install_skips_benchmark_and_telemetry_on_no(isolated_omm_home, monkeypatch):
+def test_install_runs_benchmark_but_skips_upload_on_no(isolated_omm_home, monkeypatch):
     _stub_successful_install(monkeypatch, isolated_omm_home)
     monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: False)
     bench_calls = []
@@ -52,7 +52,7 @@ def test_install_skips_benchmark_and_telemetry_on_no(isolated_omm_home, monkeypa
     result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
     assert result.exit_code == 0, result.stdout
-    assert bench_calls == []
+    assert bench_calls == ["tinyllama"]
     assert sent == []
 
 

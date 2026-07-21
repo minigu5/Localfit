@@ -1,5 +1,6 @@
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -37,7 +38,7 @@ def test_skip_unfit_returns_outcome_without_prompting_or_downloading(isolated_om
     assert download_calls == []
 
 
-def test_auto_benchmark_skips_confirm_prompt_and_sends_telemetry(isolated_omm_home, monkeypatch):
+def test_auto_upload_skips_confirm_prompt_and_sends_telemetry(isolated_omm_home, monkeypatch):
     monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
     monkeypatch.setattr(cli, "download_file", lambda url, dest: dest.write_bytes(b"x"))
     _stub_common(monkeypatch)
@@ -47,7 +48,7 @@ def test_auto_benchmark_skips_confirm_prompt_and_sends_telemetry(isolated_omm_ho
     monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 55.0)
     monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: True)
 
-    outcome = cli._install_impl(_resolved(), auto_benchmark=True)
+    outcome = cli._install_impl(_resolved(), auto_upload=True)
 
     assert outcome.tokens_per_sec == 55.0
     assert outcome.telemetry_sent is True
@@ -86,7 +87,7 @@ def test_stop_event_set_during_benchmark_raises_contribution_stopped(isolated_om
     threading.Timer(0.05, stop_event.set).start()
 
     with pytest.raises(cli.ContributionStopped):
-        cli._install_impl(_resolved(), auto_benchmark=True, stop_event=stop_event)
+        cli._install_impl(_resolved(), stop_event=stop_event)
 
 
 def test_plain_install_path_unaffected_by_stop_event_none(isolated_omm_home, monkeypatch):
@@ -107,3 +108,56 @@ def test_plain_install_path_unaffected_by_stop_event_none(isolated_omm_home, mon
 
     assert calls == ["no-kwargs"]
     assert outcome.tokens_per_sec == 10.0
+
+
+def test_benchmark_always_runs_but_upload_needs_confirm(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+    monkeypatch.setattr(cli, "download_file", lambda url, dest: dest.write_bytes(b"x"))
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+    bench_calls = []
+    monkeypatch.setattr(
+        cli.benchmark, "benchmark_ollama", lambda tag: bench_calls.append(tag) or 42.0
+    )
+    sent = []
+    monkeypatch.setattr(
+        cli.telemetry, "send_event", lambda event, force=False: sent.append((event, force))
+    )
+
+    outcome = cli._install_impl(_resolved())
+
+    assert bench_calls == ["tinyllama"]
+    assert outcome.tokens_per_sec == 42.0
+    assert sent == []
+    assert outcome.telemetry_sent is False
+
+
+def test_auto_calibrate_runs_silently_when_cached_model_available(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(
+        cli.predictor, "load_cached_model", lambda: {"trees": [{"leaf": True, "value": 20.0}]}
+    )
+    hw_stub = SimpleNamespace(
+        ram_total_gb=16.0, vram_total_gb=None, unified_memory=False, gpu_tflops=None
+    )
+    monkeypatch.setattr(cli, "scan_hardware", lambda: hw_stub)
+    monkeypatch.setattr(
+        cli.predictor,
+        "predict_speed_interval",
+        lambda *args, **kwargs: (20.0, 20.0, 20.0),
+    )
+    monkeypatch.setattr(cli, "download_file", lambda url, dest: dest.write_bytes(b"x"))
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 30.0)
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: True)
+    recorded = {}
+    monkeypatch.setattr(
+        cli.calibration,
+        "record_calibration",
+        lambda hardware, **kwargs: recorded.update(kwargs) or 1.5,
+    )
+
+    cli._install_impl(_resolved())
+
+    assert recorded["measured_tokens_per_sec"] == 30.0
+    assert recorded["predicted_tokens_per_sec"] == 20.0

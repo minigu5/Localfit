@@ -734,16 +734,56 @@ def _run_interruptible(fn, stop_event: threading.Event | None):
         pool.shutdown(wait=False)
 
 
+def _maybe_auto_calibrate(
+    filename: str, repo_id: str | None, dest: Path, tokens_per_sec: float
+) -> None:
+    """Best-effort local calibration right after a successful benchmark.
+    Silent no-op if there's no cached model to compare against - this must
+    never block or fail the install."""
+    artifact = predictor.load_cached_model()
+    if not artifact or not artifact.get("trees"):
+        return
+    hardware = scan_hardware()
+    candidate = {
+        "repo_id": repo_id,
+        "filename": filename,
+        "size_bytes": dest.stat().st_size if dest.exists() else None,
+    }
+    try:
+        predicted, _, _ = predictor.predict_speed_interval(
+            artifact["trees"],
+            hardware,
+            candidate,
+            engine="ollama",
+            apply_calibration=False,
+        )
+    except (ValueError, KeyError, TypeError, IndexError):
+        return
+    if predicted <= 0:
+        return
+    factor = calibration.record_calibration(
+        hardware,
+        measured_tokens_per_sec=tokens_per_sec,
+        predicted_tokens_per_sec=predicted,
+        engine="ollama",
+    )
+    console.print(
+        f"[dim]Local calibration updated: correction ×{factor:.2f} "
+        "(not uploaded).[/dim]"
+    )
+
+
 def _install_impl(
     resolved,
     *,
-    auto_benchmark: bool = False,
+    auto_upload: bool = False,
     skip_unfit: bool = False,
     stop_event: threading.Event | None = None,
 ) -> InstallOutcome:
-    """Core of `omm install`: download, link, register, optionally
-    benchmark+report telemetry. Shared by the plain `install` command and
-    `omm contribute`'s unattended loop via the kwargs above."""
+    """Core of `omm install`: download, link, register, benchmark+calibrate
+    automatically, optionally report telemetry. Shared by the plain
+    `install` command and `omm contribute`'s unattended loop via the
+    kwargs above."""
     url, filename, repo_id = resolved.url, resolved.filename, resolved.repo_id
 
     artifact = predictor.load_cached_model()
@@ -807,22 +847,27 @@ def _install_impl(
     tokens_per_sec = None
     telemetry_sent = False
     if linked["ollama"]:
-        should_benchmark = auto_benchmark or _ask_confirm(
-            "Benchmark this model's speed and send the result to the server?"
-        )
-        if should_benchmark:
-            console.print("Benchmarking...")
-            try:
-                tokens_per_sec = _run_interruptible(
-                    lambda: benchmark.benchmark_ollama(ollama_tag), stop_event
-                )
-            except _Interrupted as e:
-                raise ContributionStopped(filename) from e
-            if tokens_per_sec:
-                console.print(f"[cyan]{tokens_per_sec:.1f} tok/s[/cyan]")
-            telemetry_sent = _report_telemetry(filename, repo_id, tokens_per_sec)
+        console.print("Benchmarking...")
+        try:
+            tokens_per_sec = _run_interruptible(
+                lambda: benchmark.benchmark_ollama(ollama_tag), stop_event
+            )
+        except _Interrupted as e:
+            raise ContributionStopped(filename) from e
+
+        if tokens_per_sec:
+            console.print(f"[cyan]{tokens_per_sec:.1f} tok/s[/cyan]")
+            _maybe_auto_calibrate(filename, repo_id, dest, tokens_per_sec)
+
+            want_upload = auto_upload or _ask_confirm(
+                "Send this machine's benchmark result to the server?"
+            )
+            if want_upload:
+                telemetry_sent = _report_telemetry(filename, repo_id, tokens_per_sec)
+            else:
+                telemetry.log_attempt("declined_by_user", filename)
         else:
-            telemetry.log_attempt("declined_by_user", filename)
+            telemetry_sent = _report_telemetry(filename, repo_id, tokens_per_sec)
     else:
         telemetry.log_attempt("not_attempted_no_ollama_link", filename)
 
@@ -1756,7 +1801,7 @@ def _run_contribution_loop(queue, stop_event: threading.Event, refetch) -> _Cont
 
         try:
             outcome = _install_impl(
-                resolved, auto_benchmark=True, skip_unfit=True, stop_event=stop_event
+                resolved, auto_upload=True, skip_unfit=True, stop_event=stop_event
             )
         except ContributionStopped as e:
             _cleanup_incomplete_install(e.filename)

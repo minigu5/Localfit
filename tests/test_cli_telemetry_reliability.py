@@ -35,9 +35,10 @@ def _log_outcomes(isolated_omm_home):
     return [json.loads(line)["outcome"] for line in log_path.read_text().splitlines()]
 
 
-def test_declining_benchmark_confirm_logs_declined_by_user(isolated_omm_home, monkeypatch):
+def test_declining_upload_confirm_logs_declined_by_user(isolated_omm_home, monkeypatch):
     _stub_successful_install(monkeypatch)
     monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: False)
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 42.0)
 
     result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
