@@ -1977,10 +1977,29 @@ def contribute() -> None:
     models until Esc is pressed, to help grow the training dataset behind
     `omm recommend`. Deletes each model after benchmarking it (even
     successful ones) to keep disk usage bounded."""
+    policy = load_config().get("telemetry_send_policy", "ask")
+    if policy == "never":
+        console.print(
+            "[red]omm contribute requires benchmark uploads to be enabled. "
+            "Run `omm setting telemetry --enable` or `--ask` first.[/red]"
+        )
+        raise typer.Exit(1)
+    if policy == "always" and not load_config().get("contribute_always_ack"):
+        console.print(
+            "[yellow]Upload policy is 'always' - every benchmark result from this "
+            "and future omm contribute runs will be sent to the server without "
+            "asking each time.[/yellow]"
+        )
+        if not _ask_confirm("Continue?"):
+            console.print("[yellow]Cancelled.[/yellow]")
+            raise typer.Exit(0)
+        config_mod.update_config(contribute_always_ack=True)
+
     console.print(
         "[yellow]This will repeatedly download, benchmark, and delete GGUF models "
         "until you press Esc. It uses real bandwidth, disk space, and compute, "
-        "and runs unattended (no per-model confirmation).[/yellow]"
+        "runs unattended (no per-model confirmation), and uploads every benchmark "
+        f"result to the server per your current upload policy ({policy}).[/yellow]"
     )
     if not _ask_confirm("Start contributing compute now?"):
         console.print("[yellow]Cancelled.[/yellow]")

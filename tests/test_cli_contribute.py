@@ -140,3 +140,72 @@ def test_contribute_loads_quality_pack_and_passes_it_to_loop(isolated_omm_home, 
 
     assert result.exit_code == 0, result.stdout
     assert captured["quality_pack"] == fake_pack
+
+
+def test_contribute_refuses_when_policy_never(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_send_policy="never")
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 1
+    assert "requires benchmark uploads" in result.stdout
+
+
+def test_contribute_warns_once_when_policy_always(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_send_policy="always")
+    confirms = []
+
+    def fake_confirm(message, **k):
+        confirms.append(message)
+        return True
+
+    monkeypatch.setattr(cli, "_ask_confirm", fake_confirm)
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(
+        cli.predictor,
+        "load_model_with_change_note",
+        lambda url: ({"trees": [{}], "candidates": [{"repo_id": "o", "filename": "m.gguf"}]}, False),
+    )
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "rank_candidates", lambda artifact, hw: [])
+    monkeypatch.setattr(cli.benchmark_history, "loaded_refs", lambda: set())
+    monkeypatch.setattr(cli, "_EscListener", _FakeListener)
+    monkeypatch.setattr(cli, "_telemetry_row_count", lambda endpoint: None)
+    monkeypatch.setattr(cli, "autoremove", lambda: None)
+    monkeypatch.setattr(cli.quality_mod, "load_pack", lambda: ({"pack_id": "p", "items": []}, "sha"))
+    monkeypatch.setattr(cli, "_run_contribution_loop", lambda *a, **k: cli._ContributionStats(benchmarked=[]))
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "without asking each time" in result.stdout
+    assert config.load_config()["contribute_always_ack"] is True
+
+
+def test_contribute_skips_always_warning_once_acknowledged(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_send_policy="always", contribute_always_ack=True)
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(
+        cli.predictor,
+        "load_model_with_change_note",
+        lambda url: ({"trees": [{}], "candidates": [{"repo_id": "o", "filename": "m.gguf"}]}, False),
+    )
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "rank_candidates", lambda artifact, hw: [])
+    monkeypatch.setattr(cli.benchmark_history, "loaded_refs", lambda: set())
+    monkeypatch.setattr(cli, "_EscListener", _FakeListener)
+    monkeypatch.setattr(cli, "_telemetry_row_count", lambda endpoint: None)
+    monkeypatch.setattr(cli, "autoremove", lambda: None)
+    monkeypatch.setattr(cli.quality_mod, "load_pack", lambda: ({"pack_id": "p", "items": []}, "sha"))
+    monkeypatch.setattr(cli, "_run_contribution_loop", lambda *a, **k: cli._ContributionStats(benchmarked=[]))
+    confirms = []
+    monkeypatch.setattr(cli, "_ask_confirm", lambda message, **k: confirms.append(message) or True)
+
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "without asking each time" not in result.stdout
+    assert confirms == ["Start contributing compute now?"]
