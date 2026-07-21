@@ -65,3 +65,49 @@ def test_self_hosted_collector_rejects_inconsistent_sample_summary(tmp_path, mon
 
     assert client.post("/v1/benchmarks", json=event).status_code == 422
     server_app.get_store.cache_clear()
+
+
+def _quality_fields():
+    return {
+        "quality_pack_id": "localfit-gsm8k-bilingual-smoke",
+        "quality_pack_version": "1.1.0",
+        "quality_correct": 6,
+        "quality_total": 8,
+        "quality_accuracy": 0.75,
+    }
+
+
+def test_self_hosted_collector_accepts_optional_quality_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALFIT_DB_PATH", str(tmp_path / "benchmarks.sqlite3"))
+    server_app.get_store.cache_clear()
+    client = TestClient(server_app.app)
+    event = _event()
+    event.update(_quality_fields())
+
+    response = client.post("/v1/benchmarks", json=event)
+
+    assert response.status_code == 201
+    server_app.get_store.cache_clear()
+
+
+def test_self_hosted_collector_rejects_partial_quality_fields(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALFIT_DB_PATH", str(tmp_path / "benchmarks.sqlite3"))
+    server_app.get_store.cache_clear()
+    client = TestClient(server_app.app)
+    event = _event()
+    event["quality_correct"] = 6
+
+    assert client.post("/v1/benchmarks", json=event).status_code == 422
+    server_app.get_store.cache_clear()
+
+
+def test_self_hosted_collector_rejects_correct_over_total(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALFIT_DB_PATH", str(tmp_path / "benchmarks.sqlite3"))
+    server_app.get_store.cache_clear()
+    client = TestClient(server_app.app)
+    event = _event()
+    event.update(_quality_fields())
+    event["quality_correct"] = 9
+
+    assert client.post("/v1/benchmarks", json=event).status_code == 422
+    server_app.get_store.cache_clear()

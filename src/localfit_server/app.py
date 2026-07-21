@@ -36,6 +36,11 @@ class BenchmarkEvent(BaseModel):
     gpu_offload_percent: int | None = Field(default=None, ge=0, le=100)
     cpu_threads: int | None = Field(default=None, ge=1, le=4096)
     num_batch: int | None = Field(default=None, ge=1, le=1_000_000)
+    quality_pack_id: str | None = Field(default=None, max_length=100)
+    quality_pack_version: str | None = Field(default=None, max_length=20)
+    quality_correct: int | None = Field(default=None, ge=0, le=100)
+    quality_total: int | None = Field(default=None, ge=1, le=100)
+    quality_accuracy: float | None = Field(default=None, ge=0, le=1)
 
     @field_validator("model_installed", "model_repo_id")
     @classmethod
@@ -59,6 +64,22 @@ class BenchmarkEvent(BaseModel):
             raise ValueError("median speed must be inside the sample range")
         if self.sample_count is not None and bounds[0] is None:
             raise ValueError("sample_count requires minimum and maximum")
+        return self
+
+    @model_validator(mode="after")
+    def validate_quality_summary(self) -> "BenchmarkEvent":
+        quality_fields = (
+            self.quality_pack_id,
+            self.quality_pack_version,
+            self.quality_correct,
+            self.quality_total,
+            self.quality_accuracy,
+        )
+        if any(f is not None for f in quality_fields) and any(f is None for f in quality_fields):
+            raise ValueError("quality fields must all be supplied together")
+        if self.quality_correct is not None and self.quality_total is not None:
+            if self.quality_correct > self.quality_total:
+                raise ValueError("quality_correct cannot exceed quality_total")
         return self
 
 
