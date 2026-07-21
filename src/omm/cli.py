@@ -388,6 +388,36 @@ def _run_pipx_install(args: list[str], progress: Progress, task_id) -> subproces
     return subprocess.CompletedProcess(args, returncode, stdout=output, stderr=output)
 
 
+def _deps_satisfied() -> bool:
+    """True if the installed omm's declared dependencies are all present,
+    per `pip check` against the pipx-managed venv (no network, <0.2s)."""
+    try:
+        result = subprocess.run(
+            ["pipx", "runpip", "omm", "check"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
+
+
+def _run_pipx_install_with_progress(args: list[str]) -> subprocess.CompletedProcess:
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[cyan]Reinstalling omm via pipx...[/cyan]"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console,
+    ) as progress:
+        task_id = progress.add_task("upgrade", total=len(_PIPX_INSTALL_STAGES))
+        result = _run_pipx_install(args, progress, task_id)
+        progress.update(task_id, completed=len(_PIPX_INSTALL_STAGES))
+    return result
+
+
 @app.command()
 def update() -> None:
     """Reinstall omm from the latest source via pipx, then refresh rules/model data."""
@@ -402,19 +432,17 @@ def update() -> None:
 
     console.print(f"Updating omm from {REPO_URL} ...")
     try:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[cyan]Reinstalling omm via pipx...[/cyan]"),
-            BarColumn(),
-            TaskProgressColumn(),
-            TimeElapsedColumn(),
-            console=console,
-        ) as progress:
-            task_id = progress.add_task("upgrade", total=len(_PIPX_INSTALL_STAGES))
-            result = _run_pipx_install(
-                ["pipx", "install", "--force", _install_spec()], progress, task_id
+        # --no-deps skips reinstalling omm's (rarely-changed) dependencies,
+        # which is most of the wall-clock cost of a `pipx install --force`.
+        # Verify with `pip check` afterwards and fall back to a full
+        # dependency install only if this commit actually changed them.
+        result = _run_pipx_install_with_progress(
+            ["pipx", "install", "--force", "--pip-args=--no-deps", _install_spec()]
+        )
+        if result.returncode == 0 and not _deps_satisfied():
+            result = _run_pipx_install_with_progress(
+                ["pipx", "install", "--force", _install_spec()]
             )
-            progress.update(task_id, completed=len(_PIPX_INSTALL_STAGES))
     except FileNotFoundError:
         console.print(
             "[red]pipx not found. Install it first, or rerun the installer:[/red]\n"
