@@ -1,4 +1,5 @@
 import subprocess
+from pathlib import Path
 
 from rich.console import Console
 from rich.progress import Progress
@@ -345,13 +346,21 @@ def test_src_head_commit_returns_none_when_rev_parse_fails(monkeypatch, tmp_path
 
 def test_migrate_to_editable_install_clones_then_pipx_installs(monkeypatch, tmp_path):
     src = tmp_path / "src"
+    tmp_clone = tmp_path / "src.new"
     monkeypatch.setattr(cli, "SRC_DIR", src)
     monkeypatch.setattr(cli.platform, "system", lambda: "Darwin")
+
+    def fake_run(args, **kwargs):
+        if args[:2] == ["git", "clone"]:
+            Path(args[-1]).mkdir(parents=True)
+            (Path(args[-1]) / "marker").write_text("cloned")
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+
     run_calls = []
     monkeypatch.setattr(
         cli.subprocess,
         "run",
-        lambda args, **kwargs: run_calls.append(args) or subprocess.CompletedProcess(args, 0, stdout="", stderr=""),
+        lambda args, **kwargs: run_calls.append(args) or fake_run(args, **kwargs),
     )
     progress_calls = []
     monkeypatch.setattr(
@@ -363,8 +372,10 @@ def test_migrate_to_editable_install_clones_then_pipx_installs(monkeypatch, tmp_
     result = cli._migrate_to_editable_install()
 
     assert result.returncode == 0
-    assert run_calls == [["git", "clone", "--filter=blob:none", "--quiet", cli._BARE_REPO_URL, str(src)]]
+    assert run_calls == [["git", "clone", "--filter=blob:none", "--quiet", cli._BARE_REPO_URL, str(tmp_clone)]]
     assert progress_calls == [["pipx", "install", "--force", "--editable", str(src)]]
+    assert (src / "marker").read_text() == "cloned"
+    assert not tmp_clone.exists()
 
 
 def test_migrate_to_editable_install_skips_pipx_when_clone_fails(monkeypatch, tmp_path):
@@ -381,6 +392,28 @@ def test_migrate_to_editable_install_skips_pipx_when_clone_fails(monkeypatch, tm
 
     assert result.returncode == 1
     assert progress_calls == []
+
+
+def test_migrate_to_editable_install_preserves_existing_src_on_clone_failure(monkeypatch, tmp_path):
+    """A working editable install must survive a failed re-migration
+    attempt (network blip, timeout, interrupted clone) - the old rmtree-
+    before-clone order left `omm` permanently broken with
+    ModuleNotFoundError until the user reinstalled from scratch."""
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "marker").write_text("still here")
+    monkeypatch.setattr(cli, "SRC_DIR", src)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout="", stderr="clone failed"),
+    )
+    monkeypatch.setattr(cli, "_run_pipx_install_with_progress", lambda args: (_ for _ in ()).throw(AssertionError))
+
+    result = cli._migrate_to_editable_install()
+
+    assert result.returncode == 1
+    assert (src / "marker").read_text() == "still here"
 
 
 def test_git_update_src_fetches_then_resets(monkeypatch, tmp_path):

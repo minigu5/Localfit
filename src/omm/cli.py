@@ -451,25 +451,37 @@ def _run_pipx_install_with_progress(args: list[str]) -> subprocess.CompletedProc
 
 
 def _migrate_to_editable_install() -> subprocess.CompletedProcess:
-    """First-run (or self-heal) path: (re)clone the repo into SRC_DIR and
-    pipx --editable-install it, so future `omm update` calls are a `git
-    pull` instead of a full pipx reinstall. Runs whenever SRC_DIR isn't a
-    valid git checkout - regardless of whether the currently installed
-    commit already matches latest, since the goal is switching mechanism,
-    not code."""
+    """First-run (or self-heal) path: clone the repo into a scratch dir,
+    swap it into place as SRC_DIR only once the clone has actually
+    succeeded, then pipx --editable-install it, so future `omm update`
+    calls are a `git pull` instead of a full pipx reinstall. Runs whenever
+    SRC_DIR isn't a valid git checkout - regardless of whether the
+    currently installed commit already matches latest, since the goal is
+    switching mechanism, not code.
+
+    Clones into SRC_DIR.new rather than SRC_DIR directly: a clone that
+    fails partway (network drop, timeout, Ctrl-C) must not destroy a
+    working editable install - previously an rmtree-then-clone order left
+    `omm` permanently broken with ModuleNotFoundError until reinstalled
+    from scratch."""
     console.print("[cyan]Migrating to fast-update mode (one-time)...[/cyan]")
-    shutil.rmtree(SRC_DIR, ignore_errors=True)
+    tmp_dir = SRC_DIR.with_name(SRC_DIR.name + ".new")
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     try:
         clone = subprocess.run(
-            ["git", "clone", "--filter=blob:none", "--quiet", _BARE_REPO_URL, str(SRC_DIR)],
+            ["git", "clone", "--filter=blob:none", "--quiet", _BARE_REPO_URL, str(tmp_dir)],
             capture_output=True,
             text=True,
             timeout=60,
         )
     except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return subprocess.CompletedProcess([], 1, stdout="", stderr="git clone timed out")
     if clone.returncode != 0:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
         return clone
+    shutil.rmtree(SRC_DIR, ignore_errors=True)
+    tmp_dir.rename(SRC_DIR)
     return _run_pipx_install_with_progress(
         ["pipx", "install", "--force", "--editable", _install_spec()]
     )
