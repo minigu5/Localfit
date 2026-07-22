@@ -96,6 +96,24 @@ def _omm_version() -> str:
         return "dev"
 
 
+def _telemetry_destination_line() -> str:
+    """Human-readable summary of where install/contribute telemetry goes,
+    shown under the bare `omm` version banner."""
+    config = load_config()
+    policy = config.get("telemetry_send_policy", "ask")
+    endpoint = config.get("telemetry_endpoint")
+    backend = config.get("telemetry_backend", "local")
+
+    if policy == "never" or not endpoint:
+        return "Data: not sent anywhere (telemetry disabled)"
+
+    if backend == "firebase_legacy":
+        return f"Data: sent to Firebase - {endpoint}"
+    if backend == "self_hosted":
+        return f"Data: sent to self-hosted server (FastAPI+SQLite) - {endpoint}"
+    return f"Data: sent to {endpoint}"
+
+
 @app.callback(invoke_without_command=True)
 def _root(ctx: typer.Context) -> None:
     _maybe_start_update_check(ctx)
@@ -103,6 +121,7 @@ def _root(ctx: typer.Context) -> None:
         commit = _installed_commit()
         suffix = f" ({commit[:7]})" if commit else ""
         console.print(f"omm {_omm_version()}{suffix}")
+        console.print(f"[dim]{_telemetry_destination_line()}[/dim]")
         raise typer.Exit(0)
     _maybe_auto_import(ctx)
     resent = telemetry.flush_pending()
