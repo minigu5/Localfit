@@ -399,8 +399,17 @@ def _bg_version_check_cmd() -> None:
     version_check.cached_remote_head(_remote_head_commit)
 
 
-def _print_update_notice(latest: str | None, installed: str) -> None:
-    if latest and latest != installed:
+def _confirm_and_print_update_notice(cached_latest: str, installed: str) -> None:
+    """The cached remote head can be up to _TTL_SECONDS stale, so a mismatch
+    against it is only a hint, not proof. Before alarming the user, re-check
+    live and refresh the cache - this trades a bit of extra latency (only on
+    the rare command where the notice would otherwise fire) for never showing
+    a stale "update available" once the real remote has caught up."""
+    latest = _remote_head_commit()
+    if latest is None:  # offline/unreachable - don't guess, stay silent
+        return
+    version_check.record(latest)
+    if latest != installed:
         err_console.print("[yellow]Update available! Run: [bold]omm update[/bold][/yellow]")
 
 
@@ -412,7 +421,8 @@ def _maybe_start_update_check(ctx: typer.Context) -> None:
         return
     fresh, latest = version_check.cached_remote_head_if_fresh()
     if fresh:
-        ctx.call_on_close(lambda: _print_update_notice(latest, installed))
+        if latest and latest != installed:
+            ctx.call_on_close(lambda: _confirm_and_print_update_notice(latest, installed))
         return
     if version_check.should_start_check():
         version_check.mark_checking()

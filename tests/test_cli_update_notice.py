@@ -29,30 +29,45 @@ def test_bg_version_check_cmd_delegates_to_cached_remote_head(monkeypatch):
     assert calls == [cli._remote_head_commit]
 
 
-def test_print_update_notice_prints_when_newer(monkeypatch):
+def test_confirm_and_print_update_notice_prints_when_live_check_confirms(monkeypatch):
+    """The cached mismatch is only a hint; a live re-check confirming it is
+    what actually earns the notice."""
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda ref="main": "new_sha")
+    monkeypatch.setattr(cli.version_check, "record", lambda *a, **k: None)
     printed = []
     monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
-    cli._print_update_notice("new_sha", "old_sha")
+    cli._confirm_and_print_update_notice("new_sha", "old_sha")
 
     assert printed
     assert "omm update" in printed[0][0]
 
 
-def test_print_update_notice_silent_when_already_current(monkeypatch):
+def test_confirm_and_print_update_notice_silent_when_live_check_shows_current(monkeypatch):
+    """Cache said "new_sha" was newer, but the live re-check shows the
+    installed commit already caught up - this is the stale-cache case from
+    the bug report and must stay silent."""
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda ref="main": "old_sha")
+    recorded = []
+    monkeypatch.setattr(cli.version_check, "record", lambda v: recorded.append(v))
     printed = []
     monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
-    cli._print_update_notice("same_sha", "same_sha")
+    cli._confirm_and_print_update_notice("new_sha", "old_sha")
 
     assert printed == []
+    assert recorded == ["old_sha"]
 
 
-def test_print_update_notice_silent_when_no_latest_known(monkeypatch):
+def test_confirm_and_print_update_notice_silent_when_offline(monkeypatch):
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda ref="main": None)
+    monkeypatch.setattr(
+        cli.version_check, "record", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no record"))
+    )
     printed = []
     monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
-    cli._print_update_notice(None, "old_sha")
+    cli._confirm_and_print_update_notice("new_sha", "old_sha")
 
     assert printed == []
 
@@ -96,9 +111,11 @@ def test_maybe_start_update_check_skips_for_dev_install(monkeypatch):
     assert ctx.close_callbacks == []
 
 
-def test_maybe_start_update_check_prints_when_fresh_cache_has_newer_version(monkeypatch):
+def test_maybe_start_update_check_confirms_when_fresh_cache_has_newer_version(monkeypatch):
     monkeypatch.setattr(cli, "_installed_commit", lambda: "old_sha")
     monkeypatch.setattr(cli.version_check, "cached_remote_head_if_fresh", lambda: (True, "new_sha"))
+    monkeypatch.setattr(cli, "_remote_head_commit", lambda ref="main": "new_sha")
+    monkeypatch.setattr(cli.version_check, "record", lambda *a, **k: None)
     printed = []
     monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
     ctx = _FakeCtx("list")
@@ -114,13 +131,16 @@ def test_maybe_start_update_check_prints_when_fresh_cache_has_newer_version(monk
 def test_maybe_start_update_check_silent_when_fresh_cache_matches_installed(monkeypatch):
     monkeypatch.setattr(cli, "_installed_commit", lambda: "same_sha")
     monkeypatch.setattr(cli.version_check, "cached_remote_head_if_fresh", lambda: (True, "same_sha"))
+    monkeypatch.setattr(
+        cli, "_remote_head_commit", lambda ref="main": (_ for _ in ()).throw(AssertionError("no live check"))
+    )
     printed = []
     monkeypatch.setattr(cli.console, "print", lambda *a, **k: printed.append(a))
     ctx = _FakeCtx("list")
 
     cli._maybe_start_update_check(ctx)
-    ctx.close_callbacks[0]()
 
+    assert ctx.close_callbacks == []
     assert printed == []
 
 
