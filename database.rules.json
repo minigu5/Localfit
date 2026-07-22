@@ -52,7 +52,7 @@
           ".validate": "newData.val() == 'ollama'"
         },
         "benchmark_version": {
-          ".validate": "newData.isNumber() && newData.val() % 1 == 0 && newData.val() >= 1 && newData.val() <= 5"
+          ".validate": "newData.isNumber() && newData.val() % 1 == 0 && newData.val() >= 1 && newData.val() <= 6"
         },
         "recorded_at": {
           ".validate": "newData.isString() && newData.val().length >= 20 && newData.val().length <= 50"
