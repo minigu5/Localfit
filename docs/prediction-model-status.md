@@ -1,6 +1,6 @@
 # Localfit 예측 모델 작업 현황
 
-기준일: 2026-07-22  
+기준일: 2026-07-22
 브랜치: `matwaetle/prediction-evaluation`
 
 ## 한 줄 요약
