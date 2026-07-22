@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+import click
 import questionary
 import requests
 import typer
@@ -72,14 +73,37 @@ from omm.hub import (
     resolve_model,
 )
 
+class PlainHelpFormatter(click.HelpFormatter):
+    """Homebrew-style help formatter: no panels/borders, uppercase section headers."""
+
+    def write_usage(self, prog: str, args: str = "", prefix: str | None = None) -> None:
+        super().write_usage(prog, args, prefix="USAGE: ")
+
+    def write_heading(self, heading: str) -> None:
+        self.write(f"{'':>{self.current_indent}}{heading.upper()}:\n")
+
+
+click.Context.formatter_class = PlainHelpFormatter
+try:
+    # Typer >=0.16 vendors its own click fork (typer._click) instead of
+    # using the `click` package's Context directly, so patching
+    # click.Context alone leaves Typer's own help rendering unaffected.
+    from typer._click.core import Context as _TyperClickContext
+
+    _TyperClickContext.formatter_class = PlainHelpFormatter
+except ImportError:
+    pass
+
 app = typer.Typer(
     name="omm",
     help="Open source Model Manager - package manager for local LLMs (GGUF).",
+    rich_markup_mode=None,
 )
 setting_app = typer.Typer(
     name="setting",
     help="View or change omm settings (UI mode, telemetry, upload policy, catalog trust).",
     invoke_without_command=True,
+    rich_markup_mode=None,
 )
 app.add_typer(setting_app)
 console = Console()
