@@ -151,9 +151,32 @@ def _fetch_repo_gguf_info(repo_id: str) -> tuple[list[str], float | None]:
     payload = resp.json()
     siblings = payload.get("siblings", [])
     files = [s["rfilename"] for s in siblings if s["rfilename"].endswith(".gguf")]
-    total_params = payload.get("gguf", {}).get("total")
-    param_count_b = total_params / 1e9 if total_params else None
+    param_count_b = _parse_gguf_total_params(payload)
     return files, param_count_b
+
+
+def _parse_gguf_total_params(payload: dict) -> float | None:
+    total_params = payload.get("gguf", {}).get("total")
+    return total_params / 1e9 if total_params else None
+
+
+def fetch_repo_param_count_b(repo_id: str) -> float | None:
+    """Best-effort repo-level parameter count (billions), for callers that
+    only have a repo id and filename - not the full listing `resolve_model`
+    fetches - and whose filename doesn't spell out the count (e.g. repos
+    branded like "DeepSeek-V4-Flash" instead of "...-70B"). Unlike
+    `_fetch_repo_gguf_info`, this never raises: it's used to decide whether
+    to flag a search result as unviable, not to resolve an install, so a
+    failed lookup should just leave that decision unmade."""
+    try:
+        resp = requests.get(HF_API.format(repo_id=repo_id), timeout=15)
+        resp.raise_for_status()
+    except requests.RequestException:
+        return None
+    try:
+        return _parse_gguf_total_params(resp.json())
+    except ValueError:
+        return None
 
 
 def remote_file_sha256(repo_id: str, filename: str) -> str | None:

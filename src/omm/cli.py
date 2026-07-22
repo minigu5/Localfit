@@ -68,6 +68,7 @@ from omm.hub import (
     QuantVariant,
     ResolvedModel,
     best_filenames_by_tier,
+    fetch_repo_param_count_b,
     rank_quant_variants,
     remote_file_size,
     remote_file_sha256,
@@ -943,7 +944,7 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
         if v.fits is True:
             note = f"✓ fits, ~{v.required_gb:.1f}GB needed"
         elif v.fits is False:
-            note = f"may not fit, ~{v.required_gb:.1f}GB needed (you have {available_gb:.1f}GB)"
+            note = f"may not fit, ~{v.required_gb:.1f}GB needed"
         else:
             note = "fit unknown"
         if v.filename in fastest_filenames:
