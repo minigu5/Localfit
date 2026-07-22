@@ -21,6 +21,7 @@ from omm.featurize import (
     candidate_parameter_count_billions,
     candidate_quant_bits,
     estimate_model_size_gb,
+    parse_chip_score,
 )
 from omm.hardware import HardwareInfo, calculate_memory_budget
 from omm.mltree import predict_ensemble_range
@@ -119,14 +120,15 @@ def build_prediction_features(
     model_size_gb = estimate_model_size_gb("", candidate.get("size_bytes"))
     if model_size_gb is None and parameters is not None and quant_bits is not None:
         model_size_gb = parameters * quant_bits / 8.0 * 1.1
+    cpu_score, cpu_tier = parse_chip_score(hw.cpu or "")
     return build_features(
         ram_gb=hw.ram_total_gb,
         vram_gb=hw.vram_total_gb if has_gpu else 0.0,
         unified_memory=hw.unified_memory,
         param_count_b=parameters,
         quant_bits=quant_bits,
-        cpu_score=0.0,
-        cpu_tier=0.0,
+        cpu_score=cpu_score,
+        cpu_tier=cpu_tier,
         gpu_score=0.0,
         gpu_tier=0.0,
         model_size_gb=model_size_gb or 0.0,

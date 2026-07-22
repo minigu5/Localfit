@@ -66,9 +66,9 @@ for (const benchmarkVersion of [1, 2, 3, 4]) {
   );
 }
 
-const validV5 = {
+const validV6 = {
   ...valid,
-  benchmark_version: 5,
+  benchmark_version: 6,
   model_filename: "model-7B-Q4.gguf",
   model_digest: "a".repeat(64),
   parameter_count_b: 7,
@@ -89,66 +89,70 @@ const validV5 = {
   quality_correct: 4,
   quality_total: 5,
   quality_accuracy: 0.8,
+  cpu_model: "AMD Ryzen 5 5600X 6-Core Processor",
+  cpu_arch: "x86_64",
+  cpu_physical_cores: 6,
+  cpu_logical_cores: 12,
 };
-const v5Created = await request("telemetry", "POST", validV5);
-assert.equal(v5Created.ok, true, `valid schema 5 event was rejected (${v5Created.status})`);
+const v6Created = await request("telemetry", "POST", validV6);
+assert.equal(v6Created.ok, true, `valid schema 6 event was rejected (${v6Created.status})`);
 
 const taggedFilenameV5 = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   model_filename: "model:latest",
 });
-assert.equal(taggedFilenameV5.ok, true, "schema 5 rejected a normal Ollama model tag");
+assert.equal(taggedFilenameV5.ok, true, "schema 6 rejected a normal Ollama model tag");
 
 const missingV5Metadata = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   client_version: undefined,
 });
-assert.equal(missingV5Metadata.ok, false, "schema 5 accepted missing direct metadata");
+assert.equal(missingV5Metadata.ok, false, "schema 6 accepted missing direct metadata");
 
 const invalidV5Runtime = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   cpu_threads: 0,
 });
-assert.equal(invalidV5Runtime.ok, false, "schema 5 accepted invalid runtime metadata");
+assert.equal(invalidV5Runtime.ok, false, "schema 6 accepted invalid runtime metadata");
 
 const fractionalV5Runtime = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   cpu_threads: 8.5,
 });
 assert.equal(fractionalV5Runtime.ok, false, "schema 5 accepted fractional runtime metadata");
 
 const invalidV5Samples = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   sample_count: 2,
 });
 assert.equal(invalidV5Samples.ok, false, "schema 5 accepted fewer than three samples");
 
 const invalidV5Filename = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   model_filename: "C:\\private\\model.gguf",
 });
 assert.equal(invalidV5Filename.ok, false, "schema 5 accepted a local model path");
 
 const invalidV5Digest = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   model_digest: "A".repeat(64),
 });
 assert.equal(invalidV5Digest.ok, false, "schema 5 accepted a non-normalized digest");
 
 const nonHexV5Digest = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   model_digest: "g".repeat(64),
 });
 assert.equal(nonHexV5Digest.ok, false, "schema 5 accepted a non-hex digest");
 
 const invalidV5Quality = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   quality_accuracy: 0.1,
 });
 assert.equal(invalidV5Quality.ok, false, "schema 5 accepted an inconsistent quality ratio");
 
 const partialV5Quality = await request("telemetry", "POST", {
-  ...validV5,
+  ...validV6,
   quality_pack_id: undefined,
 });
 assert.equal(partialV5Quality.ok, false, "schema 5 accepted partial quality metadata");

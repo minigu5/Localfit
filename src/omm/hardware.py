@@ -28,6 +28,9 @@ class HardwareInfo:
     vram_total_gb: float | None
     vram_free_gb: float | None
     gpu_tflops: float | None = None
+    cpu_arch: str = "unknown"
+    cpu_physical_cores: int = 0
+    cpu_logical_cores: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,6 +127,20 @@ def _mac_chip_name() -> str:
         return "Apple Silicon"
 
 
+def _linux_cpu_model() -> str | None:
+    """Return Linux CPU brand; platform.processor() is often only ``x86_64``."""
+    try:
+        for line in open("/proc/cpuinfo", encoding="utf-8", errors="replace"):
+            key, separator, value = line.partition(":")
+            if separator and key.strip().lower() in {"model name", "hardware"}:
+                model = value.strip()
+                if model:
+                    return model
+    except OSError:
+        pass
+    return None
+
+
 def _scan_nvidia_vram() -> tuple[str | None, float | None, float | None]:
     """Return (gpu_name, vram_total_gb, vram_free_gb) or (None, None, None) if unavailable."""
     try:
@@ -154,6 +171,10 @@ def scan_hardware() -> HardwareInfo:
     os_name = _OS_DISPLAY_NAMES.get(raw_os_name, raw_os_name)
     os_version = platform.release()
 
+    cpu_arch = platform.machine() or "unknown"
+    cpu_physical_cores = int(psutil.cpu_count(logical=False) or 0)
+    cpu_logical_cores = int(psutil.cpu_count(logical=True) or 0)
+
     if _is_apple_silicon():
         cpu = _mac_cpu_brand()
         return HardwareInfo(
@@ -166,12 +187,17 @@ def scan_hardware() -> HardwareInfo:
             gpu_name=_mac_chip_name(),
             vram_total_gb=ram_total_gb,
             vram_free_gb=ram_available_gb,
+            cpu_arch=cpu_arch,
+            cpu_physical_cores=cpu_physical_cores,
+            cpu_logical_cores=cpu_logical_cores,
         )
 
     if raw_os_name == "Darwin":
         cpu = _mac_cpu_brand()
+    elif raw_os_name == "Linux":
+        cpu = _linux_cpu_model() or platform.processor() or cpu_arch
     else:
-        cpu = platform.processor() or platform.machine()
+        cpu = platform.processor() or cpu_arch
 
     gpu_name, vram_total_gb, vram_free_gb = _scan_nvidia_vram()
 
@@ -185,4 +211,7 @@ def scan_hardware() -> HardwareInfo:
         gpu_name=gpu_name,
         vram_total_gb=vram_total_gb,
         vram_free_gb=vram_free_gb,
+        cpu_arch=cpu_arch,
+        cpu_physical_cores=cpu_physical_cores,
+        cpu_logical_cores=cpu_logical_cores,
     )

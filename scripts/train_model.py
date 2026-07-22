@@ -39,6 +39,7 @@ from omm.featurize import (  # noqa: E402
     candidate_parameter_count_billions,
     candidate_quant_bits,
     estimate_model_size_gb,
+    parse_chip_score,
 )
 from omm.atomic import atomic_write_text, locked  # noqa: E402
 from scripts.model_quality_gate import (  # noqa: E402
@@ -191,15 +192,15 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
     if engine not in ("ollama", "llama.cpp", "lmstudio"):
         return None, "unsupported_engine"
     benchmark_version = row.get("benchmark_version")
-    if benchmark_version not in (None, 1, 2, 3, 4, 5):
+    if benchmark_version not in (None, 1, 2, 3, 4, 5, 6):
         return None, "unsupported_schema"
 
     tokens_per_sec = _bounded_number(row.get("tokens_per_sec"), 0.0, 10_000.0)
     ram_gb = _bounded_number(row.get("ram_gb"), 1.0, 1024.0)
     vram_gb = _bounded_number(row.get("vram_gb"), 0.0, 512.0)
     gpu_tflops = _bounded_number(row.get("gpu_tflops"), 0.0, 1000.0)
-    is_v5 = benchmark_version == 5
-    if is_v5:
+    is_v6 = benchmark_version == 6
+    if is_v6:
         required_runtime = (
             "runtime_profile", "context_length", "gpu_offload_percent", "cpu_threads", "num_batch",
         )
@@ -220,13 +221,13 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         return None, "invalid_measurement"
     if None in (context_length, gpu_offload_percent, cpu_threads, num_batch):
         return None, "invalid_runtime"
-    if benchmark_version in (4, 5):
-        if is_v5 and any(
+    if benchmark_version in (4, 5, 6):
+        if is_v6 and any(
             row.get(field) is None
             for field in ("sample_count", "tokens_per_sec_min", "tokens_per_sec_max")
         ):
             return None, "missing_sample_summary"
-        number_parser = _direct_bounded_number if is_v5 else _bounded_number
+        number_parser = _direct_bounded_number if is_v6 else _bounded_number
         sample_count = number_parser(row.get("sample_count", 1), 1.0, 10.0)
         sample_min = number_parser(
             row.get("tokens_per_sec_min", tokens_per_sec), 0.0, 10_000.0
@@ -240,11 +241,11 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
             or sample_min is None
             or sample_max is None
             or not sample_min <= tokens_per_sec <= sample_max
-            or (is_v5 and sample_count < 3)
+            or (is_v6 and sample_count < 3)
         ):
             return None, "invalid_samples"
 
-    if is_v5:
+    if is_v6:
         required_model_metadata = (
             "parameter_count_b", "active_parameter_count_b", "quant_bits", "engine_version", "client_version",
         )
@@ -295,6 +296,10 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         if param_count_b is None or quant_bits is None or model_size_gb is None:
             return None, "unparseable_model"
 
+    cpu_model = row.get("cpu_model") if is_v6 else ""
+    if is_v6 and (not isinstance(cpu_model, str) or not cpu_model.strip()):
+        return None, "missing_cpu_metadata"
+    cpu_score, cpu_tier = parse_chip_score(cpu_model if isinstance(cpu_model, str) else "")
     features = build_features(
         ram_gb=ram_gb,
         vram_gb=vram_gb,
@@ -303,6 +308,8 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         quant_bits=quant_bits,
         model_size_gb=model_size_gb,
         gpu_tflops=gpu_tflops or 0.0,
+        cpu_score=cpu_score,
+        cpu_tier=cpu_tier,
         context_length=context_length,
         gpu_offload_ratio=gpu_offload_percent / 100.0,
         cpu_threads=cpu_threads,
@@ -321,7 +328,7 @@ def real_rows_to_training_data_with_audit(
     valid_rows = 0
     samples_used = 0
     samples_capped = 0
-    direct_v5_groups: set[tuple[float, ...]] = set()
+    direct_v6_groups: set[tuple[float, ...]] = set()
     for row in rows:
         sample, reason = _real_row_to_sample(row)
         if sample is None:
@@ -333,10 +340,10 @@ def real_rows_to_training_data_with_audit(
         # median. This makes community retraining useful without allowing one
         # noisy client or a burst of duplicate uploads to dominate the fit.
         group_key = tuple(round(value, 3) for value in features)
-        if row.get("benchmark_version") == 5:
+        if row.get("benchmark_version") == 6:
             # Reaching this point means _real_row_to_sample accepted the
-            # explicit v5 model, runtime, and sample metadata.
-            direct_v5_groups.add(group_key)
+            # explicit v6 model, runtime, CPU, and sample metadata.
+            direct_v6_groups.add(group_key)
         samples = groups.setdefault(group_key, [])
         if len(samples) < 50:
             samples.append(tokens_per_sec)
@@ -353,7 +360,7 @@ def real_rows_to_training_data_with_audit(
         "samples_used": samples_used,
         "samples_capped": samples_capped,
         "unique_configurations": len(groups),
-        "direct_v5_unique_configurations": len(direct_v5_groups),
+        "direct_v6_unique_configurations": len(direct_v6_groups),
         "duplicates_collapsed": samples_used - len(groups),
         "rejections": dict(sorted(rejections.items())),
     }

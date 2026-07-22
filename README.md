@@ -49,7 +49,9 @@ command adapts after memory-heavy applications are opened or closed.
 `omm benchmark` runs a versioned eight-item bilingual arithmetic smoke pack
 against models already installed in Ollama. It stores parsed answers,
 correctness, pinned model metadata, and fixed-length timings under
-`~/.omm/evaluations/`; it stores no generated text or raw hardware names.
+`~/.omm/evaluations/`; it stores no generated text. Opt-in v6 telemetry sends
+CPU model, architecture, and core counts so speed predictions can distinguish
+otherwise identical Linux `x86_64` machines.
 Results are uploaded only after explicit opt-in. The pack is intentionally
 small and is not a leaderboard.
 
@@ -89,7 +91,7 @@ Automated retraining is fail-closed. Configure
 `LOCALFIT_TELEMETRY_EXPORT_URL`; configure `LOCALFIT_ADMIN_TOKEN` as well for a
 self-hosted export (it is optional for an official Firebase JSON URL). The
 scheduled job otherwise stops without changing the published artifact. It
-requires at least 100 distinct valid v5 configurations with explicit runtime
+requires at least 100 distinct valid v6 configurations with explicit runtime and CPU metadata
 metadata (legacy rows do not satisfy this minimum), rejects datasets with more
 than 25% invalid rows, and reserves a deterministic 20% holdout. A 64-tree v4
 candidate replaces the incumbent only when both holdout RMSLE and P90 absolute

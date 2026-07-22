@@ -282,7 +282,7 @@ def test_report_telemetry_omits_quality_fields_by_default(isolated_omm_home, mon
     assert sent[0]["sample_count"] == 1
 
 
-def test_report_telemetry_emits_flat_privacy_safe_v5_fields(
+def test_report_telemetry_emits_schema_v6_cpu_fields(
     isolated_omm_home, monkeypatch
 ):
     monkeypatch.setattr(
@@ -294,6 +294,9 @@ def test_report_telemetry_emits_flat_privacy_safe_v5_fields(
             unified_memory=False,
             gpu_tflops=20.0,
             cpu="private CPU name",
+            cpu_arch="x86_64",
+            cpu_physical_cores=4,
+            cpu_logical_cores=8,
             gpu_name="private GPU name",
         ),
     )
@@ -324,7 +327,7 @@ def test_report_telemetry_emits_flat_privacy_safe_v5_fields(
     )
 
     event = sent[0]
-    assert event["benchmark_version"] == 5
+    assert event["benchmark_version"] == 6
     assert event["parameter_count_b"] == 7
     assert event["active_parameter_count_b"] == 3
     assert event["quant_bits"] == 4
@@ -332,7 +335,10 @@ def test_report_telemetry_emits_flat_privacy_safe_v5_fields(
     assert event["gpu_offload_percent"] == 75
     assert event["model_digest"] == "a" * 64
     assert "runtime" not in event
-    assert "private CPU name" not in json.dumps(event)
+    assert event["cpu_model"] == "private CPU name"
+    assert event["cpu_arch"] == "x86_64"
+    assert event["cpu_physical_cores"] == 4
+    assert event["cpu_logical_cores"] == 8
     assert "private GPU name" not in json.dumps(event)
 
 
