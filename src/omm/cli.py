@@ -245,15 +245,15 @@ def scan() -> None:
 
     console.print(table)
 
-    engine_table = Table(title="Local AI runners")
+    engine_table = Table(title="Local AI runners", box=None)
     engine_table.add_column("Program", style="cyan")
     engine_table.add_column("Status", style="white")
     engine_table.add_row(
-        "Ollama", "[green]installed[/green]" if linker.is_ollama_installed() else "not detected"
+        "Ollama", "installed" if linker.is_ollama_installed() else "not detected"
     )
     engine_table.add_row(
         "LM Studio",
-        "[green]installed[/green]" if linker.is_lmstudio_installed() else "not detected",
+        "installed" if linker.is_lmstudio_installed() else "not detected",
     )
     console.print()
     console.print(engine_table)
@@ -261,7 +261,7 @@ def scan() -> None:
     reg = registry.load_registry()
     external = scan_import.find_external_models()
 
-    model_table = Table(title="Local AI models")
+    model_table = Table(title="Local AI models", box=None)
     model_table.add_column("Model", style="cyan")
     model_table.add_column("Location", style="white")
     model_table.add_column("Engine(s)")
@@ -269,7 +269,7 @@ def scan() -> None:
     for filename, entry in reg.items():
         linked = entry.get("linked", {})
         engines = [name for name, on in linked.items() if on]
-        model_table.add_row(filename, "(omm hub)", ", ".join(engines) or "-", "[green]yes[/green]")
+        model_table.add_row(filename, "(omm hub)", ", ".join(engines) or "-", "yes")
     for item in external:
         model_table.add_row(item.display_name, _shorten_home(item.path), item.engine, "no")
     console.print()
@@ -278,13 +278,13 @@ def scan() -> None:
     if _link_repair_needed(reg):
         console.print()
         console.print(
-            "[yellow]Some omm-hub models aren't linked into an installed engine yet. "
-            "Run:[/yellow] [bold]omm link[/bold]"
+            "Some omm-hub models aren't linked into an installed engine yet. "
+            "Run: omm link"
         )
     if external:
         console.print()
         console.print(
-            "[yellow]Found model file(s) outside the omm hub. Run:[/yellow] [bold]omm import[/bold]"
+            "Found model file(s) outside the omm hub. Run: omm import"
         )
 
 
