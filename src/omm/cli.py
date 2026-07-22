@@ -1974,7 +1974,8 @@ def benchmark_cmd(
     console.print(table)
     console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
     console.print(
-        "[dim]No generated text or raw hardware names are ever stored - only "
+        "[dim]No generated text is stored. v6 telemetry includes CPU model, "
+        "architecture, and core counts; it excludes GPU names. "
         "aggregate numbers may be shared below. Not a leaderboard.[/dim]"
     )
     if _resolve_upload_decision(
@@ -2104,10 +2105,12 @@ def _report_telemetry(
     digest = _normalize_model_digest(model_digest or metadata.get("digest"))
     safe_filename = _safe_model_filename(model_filename or filename)
     complete_runtime = _complete_runtime(runtime)
+    complete_cpu = _complete_cpu_metadata(info)
     client_version = _client_version()
     if (
         parameter_count is not None and active_parameter_count is not None and quant_bits is not None
-        and complete_runtime is not None and isinstance(engine_version, str) and engine_version
+        and complete_runtime is not None and complete_cpu is not None
+        and isinstance(engine_version, str) and engine_version
         and client_version is not None and sample_count >= 3
     ):
         event.update(
@@ -2116,8 +2119,9 @@ def _report_telemetry(
             quant_bits=quant_bits,
             engine_version=engine_version,
             client_version=client_version,
-            benchmark_version=5,
+            benchmark_version=6,
             **complete_runtime,
+            **complete_cpu,
         )
         if safe_filename is not None:
             event["model_filename"] = safe_filename
@@ -2142,6 +2146,30 @@ def _safe_model_filename(value: object) -> str | None:
         return None
     # Ollama registry tags are allowed, while local paths are reduced to a basename.
     return Path(value.replace("\\", "/")).name
+
+
+def _complete_cpu_metadata(info: HardwareInfo) -> dict[str, str | int] | None:
+    """Return schema-v6 CPU data only when it is useful for training."""
+    model = getattr(info, "cpu", None)
+    arch = getattr(info, "cpu_arch", None)
+    physical = getattr(info, "cpu_physical_cores", None)
+    logical = getattr(info, "cpu_logical_cores", None)
+    if not isinstance(model, str) or not isinstance(arch, str):
+        return None
+    model, arch = model.strip(), arch.strip()
+    if (
+        not model or not arch or len(model) > 256 or len(arch) > 64
+        or model.lower() == arch.lower()
+        or not isinstance(physical, int) or not isinstance(logical, int)
+        or not 1 <= physical <= logical <= 1024
+    ):
+        return None
+    return {
+        "cpu_model": model,
+        "cpu_arch": arch,
+        "cpu_physical_cores": physical,
+        "cpu_logical_cores": logical,
+    }
 
 
 def _complete_runtime(runtime: object) -> dict | None:

@@ -302,7 +302,7 @@ def validate_dataset(
     min_unique_configurations: int = 20,
     max_rejection_rate: float = 0.25,
 ) -> None:
-    """Require enough direct-v5 telemetry configurations with bounded rejection."""
+    """Require enough direct-v6 telemetry configurations with bounded rejection."""
     if not isinstance(audit, dict):
         raise ValueError("audit must be an object")
     if isinstance(min_unique_configurations, bool) or not isinstance(min_unique_configurations, int):
@@ -315,23 +315,23 @@ def validate_dataset(
     raw_rows = audit.get("raw_rows")
     rejected_rows = audit.get("rejected_rows")
     unique = audit.get("unique_configurations")
-    direct_v5_unique = audit.get("direct_v5_unique_configurations")
+    direct_v6_unique = audit.get("direct_v6_unique_configurations")
     for name, value in (
         ("raw_rows", raw_rows),
         ("rejected_rows", rejected_rows),
         ("unique_configurations", unique),
-        ("direct_v5_unique_configurations", direct_v5_unique),
+        ("direct_v6_unique_configurations", direct_v6_unique),
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"audit.{name} must be a non-negative integer")
     if rejected_rows > raw_rows:
         raise ValueError("audit.rejected_rows cannot exceed audit.raw_rows")
-    if direct_v5_unique > unique:
+    if direct_v6_unique > unique:
         raise ValueError(
-            "audit.direct_v5_unique_configurations cannot exceed audit.unique_configurations"
+            "audit.direct_v6_unique_configurations cannot exceed audit.unique_configurations"
         )
-    if direct_v5_unique < min_unique_configurations:
-        raise ValueError("dataset has too few unique direct-v5 configurations")
+    if direct_v6_unique < min_unique_configurations:
+        raise ValueError("dataset has too few unique direct-v6 configurations")
     rejection_rate = 0.0 if raw_rows == 0 else rejected_rows / raw_rows
     if rejection_rate > maximum:
         raise ValueError("dataset rejection rate exceeds limit")

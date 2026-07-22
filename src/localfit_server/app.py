@@ -44,6 +44,10 @@ class BenchmarkEvent(BaseModel):
     gpu_offload_percent: int | None = Field(default=None, ge=0, le=100)
     cpu_threads: int | None = Field(default=None, ge=1, le=4096)
     num_batch: int | None = Field(default=None, ge=1, le=1_000_000)
+    cpu_model: str | None = Field(default=None, min_length=1, max_length=256)
+    cpu_arch: str | None = Field(default=None, min_length=1, max_length=64)
+    cpu_physical_cores: int | None = Field(default=None, ge=1, le=1024)
+    cpu_logical_cores: int | None = Field(default=None, ge=1, le=1024)
     quality_pack_id: str | None = Field(default=None, max_length=100)
     quality_pack_version: str | None = Field(default=None, max_length=20)
     quality_correct: int | None = Field(default=None, ge=0, le=100)
@@ -105,8 +109,8 @@ class BenchmarkEvent(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_v5_requirements(self) -> "BenchmarkEvent":
-        if self.benchmark_version != 5:
+    def validate_v6_requirements(self) -> "BenchmarkEvent":
+        if self.benchmark_version not in (5, 6):
             return self
         required_model_metadata = (
             self.parameter_count_b,
@@ -116,7 +120,7 @@ class BenchmarkEvent(BaseModel):
             self.client_version,
         )
         if any(value is None for value in required_model_metadata):
-            raise ValueError("v5 requires model metadata and component versions")
+            raise ValueError("v5+ requires model metadata and component versions")
         if self.active_parameter_count_b > self.parameter_count_b:
             raise ValueError("active_parameter_count_b cannot exceed parameter_count_b")
         required_runtime = (
@@ -127,24 +131,35 @@ class BenchmarkEvent(BaseModel):
             self.num_batch,
         )
         if any(value is None for value in required_runtime):
-            raise ValueError("v5 requires runtime metadata")
+            raise ValueError("v5+ requires runtime metadata")
         if not self.runtime_profile.strip():
-            raise ValueError("v5 runtime_profile must be non-empty")
+            raise ValueError("v5+ runtime_profile must be non-empty")
         if not 256 <= self.context_length <= 131_072:
-            raise ValueError("v5 context_length must be between 256 and 131072")
+            raise ValueError("v5+ context_length must be between 256 and 131072")
         if not 1 <= self.cpu_threads <= 1024:
-            raise ValueError("v5 cpu_threads must be between 1 and 1024")
+            raise ValueError("v5+ cpu_threads must be between 1 and 1024")
         if not 1 <= self.num_batch <= 65_536:
-            raise ValueError("v5 num_batch must be between 1 and 65536")
+            raise ValueError("v5+ num_batch must be between 1 and 65536")
         required_samples = (
             self.sample_count,
             self.tokens_per_sec_min,
             self.tokens_per_sec_max,
         )
         if any(value is None for value in required_samples):
-            raise ValueError("v5 requires sample summary")
+            raise ValueError("v5+ requires sample summary")
         if self.sample_count < 3:
-            raise ValueError("v5 sample_count must be at least 3")
+            raise ValueError("v5+ sample_count must be at least 3")
+        if self.benchmark_version == 6:
+            cpu_fields = (
+                self.cpu_model,
+                self.cpu_arch,
+                self.cpu_physical_cores,
+                self.cpu_logical_cores,
+            )
+            if any(value is None for value in cpu_fields):
+                raise ValueError("v6 requires CPU model, architecture, and core counts")
+            if self.cpu_physical_cores > self.cpu_logical_cores:
+                raise ValueError("physical CPU cores cannot exceed logical CPU cores")
         return self
 
 

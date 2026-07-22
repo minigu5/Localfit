@@ -54,11 +54,11 @@ def test_compare_blocks_p90_ape_regression():
 
 def test_validate_dataset_rejects_insufficient_or_over_rejected_data():
     with pytest.raises(ValueError, match="too few"):
-        validate_dataset({"raw_rows": 10, "rejected_rows": 0, "unique_configurations": 19, "direct_v5_unique_configurations": 19})
+        validate_dataset({"raw_rows": 10, "rejected_rows": 0, "unique_configurations": 19, "direct_v6_unique_configurations": 19})
     with pytest.raises(ValueError, match="rejection"):
-        validate_dataset({"raw_rows": 10, "rejected_rows": 3, "unique_configurations": 20, "direct_v5_unique_configurations": 20})
+        validate_dataset({"raw_rows": 10, "rejected_rows": 3, "unique_configurations": 20, "direct_v6_unique_configurations": 20})
     with pytest.raises(ValueError, match="too few"):
-        validate_dataset({"raw_rows": 0, "rejected_rows": 0, "unique_configurations": 0, "direct_v5_unique_configurations": 0})
+        validate_dataset({"raw_rows": 0, "rejected_rows": 0, "unique_configurations": 0, "direct_v6_unique_configurations": 0})
 
 
 @pytest.mark.parametrize(
@@ -106,7 +106,7 @@ def test_compare_requires_matching_feature_contracts():
 def test_dataset_rejection_rate_must_be_a_fraction():
     with pytest.raises(ValueError, match="at most 1"):
         validate_dataset(
-            {"raw_rows": 20, "rejected_rows": 0, "unique_configurations": 20, "direct_v5_unique_configurations": 20},
+            {"raw_rows": 20, "rejected_rows": 0, "unique_configurations": 20, "direct_v6_unique_configurations": 20},
             max_rejection_rate=1.1,
         )
 

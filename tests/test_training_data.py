@@ -118,10 +118,10 @@ def test_inconsistent_schema_four_sample_summary_is_rejected():
     assert audit["rejections"] == {"invalid_samples": 1}
 
 
-def test_v5_uses_direct_metadata_without_parsing_the_model_name():
+def test_v6_uses_direct_metadata_without_parsing_the_model_name():
     row = _row(
         20,
-        benchmark_version=5,
+        benchmark_version=6,
         model_installed="unparseable-name.bin",
         model_repo_id="org/unparseable",
         model_size_bytes=None,
@@ -131,6 +131,10 @@ def test_v5_uses_direct_metadata_without_parsing_the_model_name():
         engine_version="1.0",
         client_version="1.0",
         runtime_profile="throughput",
+        cpu_model="AMD Ryzen 5 5600X",
+        cpu_arch="x86_64",
+        cpu_physical_cores=6,
+        cpu_logical_cores=12,
         sample_count=3,
         tokens_per_sec_min=19,
         tokens_per_sec_max=21,
@@ -142,9 +146,9 @@ def test_v5_uses_direct_metadata_without_parsing_the_model_name():
     assert y == [20]
 
 
-def test_v5_rejects_missing_or_invalid_direct_metadata_without_name_fallback():
+def test_v6_rejects_missing_or_invalid_direct_metadata_without_name_fallback():
     base = dict(
-        benchmark_version=5,
+        benchmark_version=6,
         model_installed="model-7B-Q4.gguf",
         parameter_count_b=7.0,
         active_parameter_count_b=3.0,
@@ -152,6 +156,10 @@ def test_v5_rejects_missing_or_invalid_direct_metadata_without_name_fallback():
         engine_version="1.0",
         client_version="1.0",
         runtime_profile="throughput",
+        cpu_model="AMD Ryzen 5 5600X",
+        cpu_arch="x86_64",
+        cpu_physical_cores=6,
+        cpu_logical_cores=12,
         sample_count=3,
         tokens_per_sec_min=19,
         tokens_per_sec_max=21,
@@ -167,16 +175,20 @@ def test_v5_rejects_missing_or_invalid_direct_metadata_without_name_fallback():
     assert reason == "missing_runtime_metadata"
 
 
-def _v5_row(speed: float, **overrides) -> dict:
+def _v6_row(speed: float, **overrides) -> dict:
     return _row(
         speed,
-        benchmark_version=5,
+        benchmark_version=6,
         parameter_count_b=7.0,
         active_parameter_count_b=3.0,
         quant_bits=4.0,
         engine_version="1.0",
         client_version="1.0",
         runtime_profile="throughput",
+        cpu_model="AMD Ryzen 5 5600X",
+        cpu_arch="x86_64",
+        cpu_physical_cores=6,
+        cpu_logical_cores=12,
         sample_count=3,
         tokens_per_sec_min=speed - 1,
         tokens_per_sec_max=speed + 1,
@@ -190,19 +202,19 @@ def test_quality_gate_rejects_legacy_only_configurations():
     )
 
     assert audit["unique_configurations"] == 2
-    assert audit["direct_v5_unique_configurations"] == 0
-    with pytest.raises(ValueError, match="too few unique direct-v5"):
+    assert audit["direct_v6_unique_configurations"] == 0
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
         validate_dataset(audit, min_unique_configurations=1)
 
 
-def test_direct_v5_duplicate_configurations_are_collapsed_for_the_gate():
+def test_direct_v6_duplicate_configurations_are_collapsed_for_the_gate():
     _X, _y, audit = train_model.real_rows_to_training_data_with_audit(
-        [_v5_row(10), _v5_row(20)]
+        [_v6_row(10), _v6_row(20)]
     )
 
     assert audit["unique_configurations"] == 1
-    assert audit["direct_v5_unique_configurations"] == 1
-    with pytest.raises(ValueError, match="too few unique direct-v5"):
+    assert audit["direct_v6_unique_configurations"] == 1
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
         validate_dataset(audit, min_unique_configurations=2)
 
 
@@ -246,7 +258,7 @@ def test_training_audit_explains_rejections_and_duplicate_collapse():
         "samples_used": 2,
         "samples_capped": 0,
         "unique_configurations": 1,
-        "direct_v5_unique_configurations": 0,
+        "direct_v6_unique_configurations": 0,
         "duplicates_collapsed": 1,
         "rejections": {
             "invalid_measurement": 1,
