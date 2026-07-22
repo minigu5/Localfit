@@ -1,3 +1,5 @@
+import json
+
 from typer.testing import CliRunner
 
 from omm import cli, search as search_mod
@@ -58,6 +60,37 @@ def test_search_prints_numbered_refs_and_records_session(monkeypatch):
     assert recorded == [["tinyllama-1.1b-q4"]]
 
 
+def test_search_json_is_parseable_and_has_expected_fields(monkeypatch):
+    monkeypatch.setattr(cli, "load_config", lambda: {"model_url": None})
+    monkeypatch.setattr(
+        cli.search_mod,
+        "local_candidate_pool",
+        lambda model_url: [
+            {
+                "name": "tinyllama-1.1b-q4",
+                "repo_id": "TheBloke/TinyLlama-1.1B-Chat-v1.0-GGUF",
+                "description": "Curated default",
+            },
+        ],
+    )
+    monkeypatch.setattr(cli.search_mod, "search_huggingface", lambda query, **kwargs: [])
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+
+    result = runner.invoke(cli.app, ["search", "tiny", "--json"])
+
+    assert result.exit_code == 0, result.stdout
+    data = json.loads(result.stdout)
+    assert data == [
+        {
+            "index": 1,
+            "family": "TinyLlama",
+            "ref": "tinyllama-1.1b-q4",
+            "description": "Curated default",
+            "fits_hardware": True,
+        }
+    ]
+
+
 def test_search_exits_nonzero_when_nothing_matches(monkeypatch):
     monkeypatch.setattr(cli, "load_config", lambda: {"model_url": None})
     monkeypatch.setattr(search_mod, "local_candidate_pool", lambda model_url: [])
@@ -66,4 +99,4 @@ def test_search_exits_nonzero_when_nothing_matches(monkeypatch):
     result = runner.invoke(cli.app, ["search", "nonexistent-xyz"])
 
     assert result.exit_code == 1
-    assert "No models found" in result.stdout
+    assert "No models found" in result.stderr

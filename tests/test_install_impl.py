@@ -55,6 +55,27 @@ def test_auto_upload_skips_confirm_prompt_and_sends_telemetry(isolated_omm_home,
     assert outcome.telemetry_sent is True
 
 
+def test_no_upload_skips_confirm_prompt_and_does_not_send_telemetry(isolated_omm_home, monkeypatch):
+    from omm import config as config_mod
+
+    config_mod.update_config(telemetry_send_policy="ask")
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
+    monkeypatch.setattr(cli, "download_file", lambda url, dest: dest.write_bytes(b"x"))
+    _stub_common(monkeypatch)
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 55.0)
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append(event) or True)
+
+    outcome = cli._install_impl(_resolved(), no_upload=True)
+
+    assert outcome.tokens_per_sec == 55.0
+    assert outcome.telemetry_sent is False
+    assert sent == []
+
+
 def test_stop_event_set_before_download_raises_contribution_stopped(isolated_omm_home, monkeypatch):
     monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: None)
 

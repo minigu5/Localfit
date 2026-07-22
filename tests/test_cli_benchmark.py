@@ -129,7 +129,7 @@ def test_benchmark_stops_when_ollama_is_not_running(isolated_omm_home, monkeypat
     result = runner.invoke(cli.app, ["benchmark", "small:latest"])
 
     assert result.exit_code == 1
-    assert "Ollama is not running" in result.stdout
+    assert "Ollama is not running" in result.stderr
 
 
 def test_benchmark_declines_starting_daemon_when_prompted(isolated_omm_home, monkeypatch):
@@ -145,7 +145,7 @@ def test_benchmark_declines_starting_daemon_when_prompted(isolated_omm_home, mon
     result = runner.invoke(cli.app, ["benchmark", "small:latest"])
 
     assert result.exit_code == 1
-    assert "Ollama is not running" in result.stdout
+    assert "Ollama is not running" in result.stderr
 
 
 def test_benchmark_starts_and_stops_daemon_when_confirmed(isolated_omm_home, monkeypatch):

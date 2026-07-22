@@ -18,20 +18,20 @@ Requirements: Python 3.10+. GPU detection extras (`omm[nvidia]`) are installed a
 omm scan             # Print a hardware, runner, and model summary (RAM, VRAM, OS)
 omm recommend        # Suggest a model that fits this machine, then offer to install it
 omm tune <name>      # Recommend context, GPU offload, threads, and batch size
-omm benchmark qwen3:4b exaone3.5:2.4b  # Local quality + speed smoke evidence
-omm search <query>   # Search curated models, cached candidates, and HuggingFace
-omm install <name>   # Download a model and link it into LM Studio / Ollama
-omm import           # Adopt GGUF files already sitting in Ollama/LM Studio into the hub
+omm benchmark <name>  # Local quality + speed smoke evidence
+omm search <query> [--json]  # Search curated models, cached candidates, and HuggingFace
+omm install <name> [--skip-unfit] [--upload/--no-upload]  # Download a model and link it into LM Studio / Ollama
+omm import [--yes]   # Adopt GGUF files already sitting in Ollama/LM Studio into the hub
 omm uninstall <name> # Uninstall a model and clean up its symlinks/manifests
-omm uninstall all    # Uninstall every model installed via omm
-omm list             # Show models installed via omm and their linked status
-omm info <name>      # Show a model's name, version, size, and linked-program run commands
+omm uninstall all [--yes]  # Uninstall every model installed via omm
+omm list [--json]    # Show models installed via omm and their linked status
+omm info <name> [--json]  # Show a model's name, version, size, and linked-program run commands
 omm upgrade <name>   # Refresh a model against its source if it has changed since install
-omm upgrade          # Check every installed model for updates
+omm upgrade [--yes]  # Check every installed model for updates
 omm link             # Re-verify and repair every installed model's LM Studio/Ollama links
 omm link <directory> # Reuse central GGUF files in another app without copying them
 omm autoremove       # Clean up broken symlinks and orphaned partial downloads
-omm contribute       # Repeatedly install/benchmark/upload hardware-fit models to grow the dataset
+omm contribute [--yes]  # Repeatedly install/benchmark/upload hardware-fit models to grow the dataset
 omm update           # Git-pull the latest source into ~/.omm/src, then refresh rules/model data
 omm setting          # Interactive menu for UI mode, telemetry, upload policy, and catalog trust
 omm setting ui compact          # Use short everyday tables (`detailed` for diagnostics)
@@ -43,6 +43,10 @@ omm help [command]   # Show help, same as --help
 ```
 
 `install`, `uninstall`, `info`, and `upgrade` accept either a model name/reference or the numeric index shown by the last `omm search` or `omm list` run in that terminal. `search`/`install` mark models predicted not to run on this machine's hardware in red.
+
+### Scripting
+
+All errors, warnings, and confirmation prompts print to stderr; `--json` output on `search`/`list`/`info`/`benchmark` is the only thing written to stdout, so it's safe to pipe (e.g. `omm list --json | jq .`). Any command that would otherwise prompt for confirmation fails fast with a non-zero exit code when there's no terminal attached instead of hanging — pass `--yes`/`-y` (`uninstall all`, `upgrade`, `import`, `contribute`) or the relevant flag (`install --skip-unfit`, `install --upload`/`--no-upload`) to run it unattended.
 
 Localfit does not assume all installed memory belongs to the model. A live
 scan subtracts memory currently used by other applications, keeps at least

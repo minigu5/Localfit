@@ -75,7 +75,7 @@ def test_install_warns_and_proceeds_when_user_confirms(isolated_omm_home, monkey
     result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
     assert result.exit_code == 0, result.stdout
-    assert "predicted not to run" in result.stdout
+    assert "predicted not to run" in result.stderr
     assert "Installed" in result.stdout
 
 
@@ -91,5 +91,22 @@ def test_install_aborts_when_declined_after_hardware_warning(isolated_omm_home, 
     result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4"])
 
     assert result.exit_code == 0, result.stdout
-    assert "Cancelled" in result.stdout
+    assert "Cancelled" in result.stderr
+    assert download_calls == []
+
+
+def test_install_skip_unfit_flag_bypasses_prompt_without_a_tty(isolated_omm_home, monkeypatch):
+    """--skip-unfit must let a script install a batch of models on hardware
+    that can't run all of them without ever touching the confirm prompt -
+    the prompt would error out immediately without a tty (see P0 fix)."""
+    _stub_successful_install(monkeypatch, isolated_omm_home)
+    monkeypatch.setattr(cli.predictor, "load_cached_model", lambda: {"trees": [{}]})
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "predict_speed", lambda trees, hw, candidate: 0.0)
+    download_calls = []
+    monkeypatch.setattr(cli, "download_file", lambda url, dest: download_calls.append(dest))
+
+    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4", "--skip-unfit"])
+
+    assert result.exit_code == 0, result.stdout
     assert download_calls == []

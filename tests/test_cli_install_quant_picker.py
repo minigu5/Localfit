@@ -73,7 +73,7 @@ def test_install_cancels_cleanly_when_quant_prompt_is_escaped(isolated_omm_home,
     result = runner.invoke(cli.app, ["install", repo_id])
 
     assert result.exit_code == 0
-    assert "Cancelled" in result.stdout
+    assert "Cancelled" in result.stderr
 
 
 def test_quant_picker_marks_predicted_fastest_variant_green(isolated_omm_home, monkeypatch):

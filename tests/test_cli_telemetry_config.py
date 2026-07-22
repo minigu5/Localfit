@@ -65,4 +65,4 @@ def test_upload_rejects_multiple_policy_flags(isolated_omm_home):
     result = runner.invoke(cli.app, ["setting", "upload", "--enable", "--disable"])
 
     assert result.exit_code == 1
-    assert "only one" in result.stdout.lower()
+    assert "only one" in result.stderr.lower()

@@ -28,7 +28,7 @@ def test_declining_consent_cancels_before_any_other_check(isolated_omm_home, mon
     result = runner.invoke(cli.app, ["contribute"])
 
     assert result.exit_code == 0, result.stdout
-    assert "Cancelled" in result.stdout
+    assert "Cancelled" in result.stderr
 
 
 def test_requires_ollama_daemon(isolated_omm_home, monkeypatch):
@@ -38,7 +38,7 @@ def test_requires_ollama_daemon(isolated_omm_home, monkeypatch):
     result = runner.invoke(cli.app, ["contribute"])
 
     assert result.exit_code == 1
-    assert "Ollama daemon" in result.stdout
+    assert "Ollama daemon" in result.stderr
 
 
 def test_requires_trained_recommendation_model(isolated_omm_home, monkeypatch):
@@ -49,7 +49,7 @@ def test_requires_trained_recommendation_model(isolated_omm_home, monkeypatch):
     result = runner.invoke(cli.app, ["contribute"])
 
     assert result.exit_code == 1
-    assert "No trained recommendation model" in result.stdout
+    assert "No trained recommendation model" in result.stderr
 
 
 def test_happy_path_runs_loop_cleans_up_and_prints_summary(isolated_omm_home, monkeypatch):
@@ -85,6 +85,33 @@ def test_happy_path_runs_loop_cleans_up_and_prints_summary(isolated_omm_home, mo
     assert "session summary" in result.stdout.lower()
     assert "m" in result.stdout and "12.5" in result.stdout
     assert "100 -> 100" in result.stdout
+
+
+def test_contribute_yes_flag_skips_prompt_without_a_tty(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_endpoint="https://example.com/telemetry.json")
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(
+        cli.predictor,
+        "load_model_with_change_note",
+        lambda url: ({"trees": [{}], "candidates": [{"repo_id": "o", "filename": "m.gguf"}]}, False),
+    )
+    monkeypatch.setattr(cli, "scan_hardware", lambda: object())
+    monkeypatch.setattr(cli.predictor, "rank_candidates", lambda artifact, hw: [])
+    monkeypatch.setattr(cli.benchmark_history, "loaded_refs", lambda: set())
+    monkeypatch.setattr(cli, "_EscListener", _FakeListener)
+    monkeypatch.setattr(cli, "_telemetry_row_count", lambda endpoint: 100)
+    monkeypatch.setattr(cli, "_run_contribution_loop", lambda *a, **k: cli._ContributionStats(benchmarked=[]))
+    monkeypatch.setattr(cli, "autoremove", lambda: None)
+
+    result = runner.invoke(cli.app, ["contribute", "--yes"])
+
+    assert result.exit_code == 0, result.stdout
+
+
+def test_contribute_without_yes_errors_without_a_tty(isolated_omm_home):
+    result = runner.invoke(cli.app, ["contribute"])
+
+    assert result.exit_code == 1
 
 
 def test_telemetry_row_count_returns_none_on_network_error(monkeypatch):
@@ -151,7 +178,7 @@ def test_contribute_refuses_when_policy_never(isolated_omm_home, monkeypatch):
     result = runner.invoke(cli.app, ["contribute"])
 
     assert result.exit_code == 1
-    assert "requires benchmark uploads" in result.stdout
+    assert "requires benchmark uploads" in result.stderr
 
 
 def test_contribute_warns_once_when_policy_always(isolated_omm_home, monkeypatch):
@@ -181,7 +208,7 @@ def test_contribute_warns_once_when_policy_always(isolated_omm_home, monkeypatch
     result = runner.invoke(cli.app, ["contribute"])
 
     assert result.exit_code == 0, result.stdout
-    assert "without asking each time" in result.stdout
+    assert "without asking each time" in result.stderr
     assert config.load_config()["contribute_always_ack"] is True
 
 

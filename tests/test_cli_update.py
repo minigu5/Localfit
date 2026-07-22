@@ -121,7 +121,7 @@ def test_update_reports_error_when_git_update_fails(monkeypatch):
     result = runner.invoke(cli.app, ["update"])
 
     assert result.exit_code == 1
-    assert "fetch failed" in result.stdout
+    assert "fetch failed" in result.stderr
     assert refresh_calls == []
 
 
@@ -146,7 +146,7 @@ def test_update_reports_error_when_pipx_missing(monkeypatch):
     result = runner.invoke(cli.app, ["update"])
 
     assert result.exit_code == 1
-    assert "not found" in result.stdout
+    assert "not found" in result.stderr
     assert refresh_calls == []
 
 
@@ -171,7 +171,7 @@ def test_update_reports_error_and_skips_data_refresh_on_pipx_failure(monkeypatch
     result = runner.invoke(cli.app, ["update"])
 
     assert result.exit_code == 1
-    assert "boom" in result.stdout
+    assert "boom" in result.stderr
     assert refresh_calls == []
 
 

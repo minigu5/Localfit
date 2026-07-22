@@ -56,6 +56,34 @@ def test_install_runs_benchmark_but_skips_upload_on_no(isolated_omm_home, monkey
     assert sent == []
 
 
+def test_install_no_upload_flag_skips_prompt_without_a_tty(isolated_omm_home, monkeypatch):
+    """--no-upload must let a script install without ever hitting the
+    upload confirm prompt, which errors out immediately without a tty
+    (see P0 fix) under the default 'ask' policy."""
+    _stub_successful_install(monkeypatch, isolated_omm_home)
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 42.0)
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append((event, force)))
+
+    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4", "--no-upload"])
+
+    assert result.exit_code == 0, result.stdout
+    assert sent == []
+
+
+def test_install_upload_flag_sends_telemetry_without_a_tty(isolated_omm_home, monkeypatch):
+    _stub_successful_install(monkeypatch, isolated_omm_home)
+    monkeypatch.setattr(cli.benchmark, "benchmark_ollama", lambda tag: 42.0)
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append((event, force)))
+
+    result = runner.invoke(cli.app, ["install", "tinyllama-1.1b-q4", "--upload"])
+
+    assert result.exit_code == 0, result.stdout
+    assert len(sent) == 1
+    assert sent[0][1] is True
+
+
 def test_ask_confirm_uses_questionary_with_auto_enter(monkeypatch):
     captured = {}
 
@@ -70,8 +98,19 @@ def test_ask_confirm_uses_questionary_with_auto_enter(monkeypatch):
         return FakeQuestion()
 
     monkeypatch.setattr(cli.questionary, "confirm", fake_confirm)
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: True)
 
     result = cli._ask_confirm("질문?", default=False)
 
     assert result is True
     assert captured == {"message": "질문?", "default": False, "auto_enter": True}
+
+
+def test_ask_confirm_errors_instead_of_hanging_without_a_tty(monkeypatch):
+    monkeypatch.setattr(cli.sys.stdin, "isatty", lambda: False)
+
+    try:
+        cli._ask_confirm("질문?", default=False)
+        assert False, "expected typer.Exit"
+    except cli.typer.Exit as exc:
+        assert exc.exit_code == 1

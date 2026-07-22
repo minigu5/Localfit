@@ -24,6 +24,25 @@ def test_uninstall_all_removes_every_registered_model(isolated_omm_home, monkeyp
     assert not (cli.MODELS_DIR / "b.gguf").exists()
 
 
+def test_uninstall_all_yes_flag_skips_prompt_without_a_tty(isolated_omm_home, monkeypatch):
+    (cli.MODELS_DIR / "a.gguf").write_bytes(b"fake-gguf")
+    registry.save_registry({"a.gguf": {"linked": {"lmstudio": False, "ollama": False}}})
+
+    result = runner.invoke(cli.app, ["uninstall", "all", "--yes"])
+
+    assert result.exit_code == 0, result.stdout
+    assert registry.load_registry() == {}
+
+
+def test_uninstall_all_without_yes_errors_without_a_tty(isolated_omm_home):
+    registry.save_registry({"a.gguf": {"linked": {"lmstudio": False, "ollama": False}}})
+
+    result = runner.invoke(cli.app, ["uninstall", "all"])
+
+    assert result.exit_code == 1
+    assert registry.load_registry() != {}
+
+
 def test_uninstall_all_cancelled_leaves_registry_untouched(isolated_omm_home, monkeypatch):
     registry.save_registry({"a.gguf": {"linked": {"lmstudio": False, "ollama": False}}})
     monkeypatch.setattr(cli, "_ask_confirm", lambda message, default=False: False)
@@ -82,4 +101,4 @@ def test_remove_still_errors_when_nothing_on_disk(isolated_omm_home):
     result = runner.invoke(cli.app, ["uninstall", "nothing-here.gguf"])
 
     assert result.exit_code == 1
-    assert "is not installed via omm" in result.stdout
+    assert "is not installed via omm" in result.stderr

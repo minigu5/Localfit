@@ -72,7 +72,7 @@ def test_upgrade_skips_when_remote_hash_unknown(isolated_omm_home, monkeypatch):
     result = runner.invoke(cli.app, ["upgrade", "model.gguf"])
 
     assert result.exit_code == 0, result.stdout
-    assert "could not check for updates" in result.stdout
+    assert "could not check for updates" in result.stderr
     assert registry.load_registry()["model.gguf"]["sha256"] == "old-hash"
 
 
@@ -128,8 +128,28 @@ def test_upgrade_all_confirmation_cancelled_leaves_registry_untouched(isolated_o
     result = runner.invoke(cli.app, ["upgrade"])
 
     assert result.exit_code == 0, result.stdout
-    assert "Cancelled" in result.stdout
+    assert "Cancelled" in result.stderr
     assert registry.load_registry()["model.gguf"]["sha256"] == "old-hash"
+
+
+def test_upgrade_all_yes_flag_skips_prompt_without_a_tty(isolated_omm_home, monkeypatch):
+    _no_engines(monkeypatch)
+    registry.save_registry({"model.gguf": _entry(sha256="same-hash")})
+    monkeypatch.setattr(cli, "remote_file_sha256", lambda repo_id, filename: "same-hash")
+
+    result = runner.invoke(cli.app, ["upgrade", "--yes"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "0 updated, 1 up to date, 0 skipped" in result.stdout
+
+
+def test_upgrade_all_without_yes_errors_without_a_tty(isolated_omm_home, monkeypatch):
+    _no_engines(monkeypatch)
+    registry.save_registry({"model.gguf": _entry()})
+
+    result = runner.invoke(cli.app, ["upgrade"])
+
+    assert result.exit_code == 1
 
 
 def test_upgrade_all_reports_summary_counts(isolated_omm_home, monkeypatch):
@@ -171,4 +191,4 @@ def test_upgrade_errors_for_uninstalled_model(isolated_omm_home):
     result = runner.invoke(cli.app, ["upgrade", "nothing-here.gguf"])
 
     assert result.exit_code == 1
-    assert "is not installed via omm" in result.stdout
+    assert "is not installed via omm" in result.stderr

@@ -28,7 +28,7 @@ def test_install_numeric_arg_out_of_range(monkeypatch):
     result = runner.invoke(cli.app, ["install", "5"])
 
     assert result.exit_code == 1
-    assert "5" in result.stdout
+    assert "5" in result.stderr
 
 
 def test_install_numeric_arg_with_no_prior_results(monkeypatch):
@@ -37,7 +37,7 @@ def test_install_numeric_arg_with_no_prior_results(monkeypatch):
     result = runner.invoke(cli.app, ["install", "1"])
 
     assert result.exit_code == 1
-    assert "omm search" in result.stdout or "omm list" in result.stdout
+    assert "omm search" in result.stderr or "omm list" in result.stderr
 
 
 def test_install_non_numeric_arg_is_unaffected(isolated_omm_home, monkeypatch):

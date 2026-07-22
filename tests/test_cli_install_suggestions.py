@@ -19,8 +19,8 @@ def test_install_unknown_model_prints_did_you_mean_suggestions(monkeypatch):
     result = runner.invoke(cli.app, ["install", "tinylama-1.1b-q4"])
 
     assert result.exit_code == 1
-    assert "Did you mean one of these?" in result.stdout
-    assert "tinyllama-1.1b-q4" in result.stdout
+    assert "Did you mean one of these?" in result.stderr
+    assert "tinyllama-1.1b-q4" in result.stderr
 
 
 def test_install_unknown_model_with_no_suggestions_still_exits_cleanly(monkeypatch):

@@ -31,7 +31,7 @@ def test_bg_version_check_cmd_delegates_to_cached_remote_head(monkeypatch):
 
 def test_print_update_notice_prints_when_newer(monkeypatch):
     printed = []
-    monkeypatch.setattr(cli.console, "print", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
     cli._print_update_notice("new_sha", "old_sha")
 
@@ -41,7 +41,7 @@ def test_print_update_notice_prints_when_newer(monkeypatch):
 
 def test_print_update_notice_silent_when_already_current(monkeypatch):
     printed = []
-    monkeypatch.setattr(cli.console, "print", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
     cli._print_update_notice("same_sha", "same_sha")
 
@@ -50,7 +50,7 @@ def test_print_update_notice_silent_when_already_current(monkeypatch):
 
 def test_print_update_notice_silent_when_no_latest_known(monkeypatch):
     printed = []
-    monkeypatch.setattr(cli.console, "print", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
 
     cli._print_update_notice(None, "old_sha")
 
@@ -100,7 +100,7 @@ def test_maybe_start_update_check_prints_when_fresh_cache_has_newer_version(monk
     monkeypatch.setattr(cli, "_installed_commit", lambda: "old_sha")
     monkeypatch.setattr(cli.version_check, "cached_remote_head_if_fresh", lambda: (True, "new_sha"))
     printed = []
-    monkeypatch.setattr(cli.console, "print", lambda *a, **k: printed.append(a))
+    monkeypatch.setattr(cli.err_console, "print", lambda *a, **k: printed.append(a))
     ctx = _FakeCtx("list")
 
     cli._maybe_start_update_check(ctx)
@@ -181,7 +181,7 @@ def test_end_to_end_shows_update_notice_on_a_later_short_command(isolated_omm_ho
 
     second = runner.invoke(cli.app, ["list"])
     assert second.exit_code == 0, second.stdout
-    assert "omm update" in second.stdout
+    assert "omm update" in second.stderr
 
 
 def test_end_to_end_silent_when_already_up_to_date(isolated_omm_home, monkeypatch):

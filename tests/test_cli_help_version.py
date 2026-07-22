@@ -33,4 +33,4 @@ def test_help_with_unknown_command_errors():
     result = runner.invoke(cli.app, ["help", "no-such-command"])
 
     assert result.exit_code == 1
-    assert "No such command" in result.stdout
+    assert "No such command" in result.stderr

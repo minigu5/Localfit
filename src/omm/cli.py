@@ -109,6 +109,7 @@ setting_app = typer.Typer(
 )
 app.add_typer(setting_app)
 console = Console()
+err_console = Console(stderr=True)
 
 REPO_URL = "git+https://github.com/minigu5/Localfit.git"
 
@@ -178,7 +179,7 @@ def help_cmd(
 
     cmd_obj = root_ctx.command.get_command(root_ctx, command)
     if cmd_obj is None:
-        console.print(f"[red]No such command '{command}'. See `omm help`.[/red]")
+        err_console.print(f"[red]No such command '{command}'. See `omm help`.[/red]")
         raise typer.Exit(1)
 
     sub_ctx = cmd_obj.make_context(command, [], parent=root_ctx, resilient_parsing=True)
@@ -301,7 +302,7 @@ def _refresh_data() -> None:
             fetched = rules_mod.fetch_rules(rules_url)
             console.print(f"[green]Updated rules.json ({len(fetched)} entries) from {rules_url}[/green]")
         except requests.RequestException as e:
-            console.print(f"[red]Failed to fetch rules from {rules_url}: {e}[/red]")
+            err_console.print(f"[red]Failed to fetch rules from {rules_url}: {e}[/red]")
     else:
         console.print("[dim]No rules_url configured - using bundled defaults.[/dim]")
 
@@ -319,7 +320,7 @@ def _refresh_data() -> None:
                 f"({len(artifact.get('candidates', []))} candidates) from {model_url}[/green]"
             )
         except (requests.RequestException, ValueError) as e:
-            console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
+            err_console.print(f"[red]Failed to fetch trained model from {model_url}: {e}[/red]")
 
 
 _BARE_REPO_URL = REPO_URL.removeprefix("git+")
@@ -400,7 +401,7 @@ def _bg_version_check_cmd() -> None:
 
 def _print_update_notice(latest: str | None, installed: str) -> None:
     if latest and latest != installed:
-        console.print("[yellow]Update available! Run: [bold]omm update[/bold][/yellow]")
+        err_console.print("[yellow]Update available! Run: [bold]omm update[/bold][/yellow]")
 
 
 def _maybe_start_update_check(ctx: typer.Context) -> None:
@@ -447,7 +448,7 @@ def _maybe_auto_import(ctx: typer.Context) -> None:
     _run_import_flow()
 
 
-def _run_import_flow(extra_path: Path | None = None) -> None:
+def _run_import_flow(extra_path: Path | None = None, *, yes: bool = False) -> None:
     found = scan_import.find_external_models(extra_path)
     groups = scan_import.group_by_hash(found)
     if not groups:
@@ -459,21 +460,24 @@ def _run_import_flow(extra_path: Path | None = None) -> None:
         f"Found {len(groups)} model(s) ({len(found)} file(s), ~{total_gb:.1f} GB) "
         "in Ollama/LM Studio not yet managed by omm."
     )
-    if not _ask_confirm(f"Import {len(groups)} model(s) into the omm hub?"):
-        console.print("[yellow]Skipped.[/yellow]")
+    if not yes and not _ask_confirm(f"Import {len(groups)} model(s) into the omm hub?"):
+        err_console.print("[yellow]Skipped.[/yellow]")
         return
 
-    choices = [
-        questionary.Choice(
-            title=f"{g.display_name} ({g.size_bytes / (1024**3):.1f} GB, found in: {', '.join(g.engines)})",
-            value=g.sha256,
-            checked=True,
-        )
-        for g in groups
-    ]
-    selected_hashes = _ask_select(questionary.checkbox("Select which models to import:", choices=choices))
+    if yes:
+        selected_hashes = [g.sha256 for g in groups]
+    else:
+        choices = [
+            questionary.Choice(
+                title=f"{g.display_name} ({g.size_bytes / (1024**3):.1f} GB, found in: {', '.join(g.engines)})",
+                value=g.sha256,
+                checked=True,
+            )
+            for g in groups
+        ]
+        selected_hashes = _ask_select(questionary.checkbox("Select which models to import:", choices=choices))
     if not selected_hashes:
-        console.print("[yellow]Nothing selected, skipped.[/yellow]")
+        err_console.print("[yellow]Nothing selected, skipped.[/yellow]")
         return
 
     bytes_saved = 0
@@ -496,6 +500,12 @@ def import_cmd(
     path: str = typer.Argument(
         None, help="Optional extra directory to also scan for stray .gguf files."
     ),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Don't ask for confirmation and import every model found. For scripting.",
+    ),
 ) -> None:
     """Scan Ollama/LM Studio (and optionally PATH) for .gguf files not yet
     managed by omm, and offer to adopt them into the hub."""
@@ -503,9 +513,9 @@ def import_cmd(
     if path:
         extra_path = Path(path).expanduser()
         if not extra_path.is_dir():
-            console.print(f"[red]Not a directory: {extra_path}[/red]")
+            err_console.print(f"[red]Not a directory: {extra_path}[/red]")
             raise typer.Exit(1)
-    _run_import_flow(extra_path)
+    _run_import_flow(extra_path, yes=yes)
 
 
 # pipx gives no byte-level install progress, but it does print a fixed,
@@ -674,14 +684,14 @@ def update() -> None:
                     ["pipx", "install", "--force", "--editable", _install_spec()]
                 )
     except FileNotFoundError:
-        console.print(
+        err_console.print(
             "[red]git or pipx not found. Install them first, or rerun the installer:[/red]\n"
             "  curl -fsSL https://raw.githubusercontent.com/minigu5/Localfit/main/install.sh | sh"
         )
         raise typer.Exit(1)
 
     if result.returncode != 0:
-        console.print(f"[red]Update failed:[/red]\n{result.stderr}")
+        err_console.print(f"[red]Update failed:[/red]\n{result.stderr}")
         raise typer.Exit(1)
 
     console.print("[green]omm reinstalled from the latest source.[/green]")
@@ -703,7 +713,22 @@ def _stdin_is_tty() -> bool:
     return sys.stdin.isatty()
 
 
+def _require_tty(what: str) -> None:
+    """Interactive prompts (questionary) have no non-interactive fallback
+    and will hang or misbehave without a real terminal. Fail loudly and
+    immediately instead, so scripts/CI get a clear error rather than a
+    hang. Callers that have a flag to bypass the prompt entirely should
+    check that flag before ever reaching this."""
+    if not sys.stdin.isatty():
+        err_console.print(
+            f"[red]{what} requires an interactive terminal. "
+            "Re-run from a real terminal, or pass the flag that bypasses this prompt.[/red]"
+        )
+        raise typer.Exit(1)
+
+
 def _ask_select(question: questionary.Question):
+    _require_tty("This selection")
     return _add_escape_to_cancel(question).ask()
 
 
@@ -713,6 +738,7 @@ def _ask_confirm(message: str, default: bool = False) -> bool:
     key bindings are already merged by the time we get the Question object,
     so (unlike _ask_select) we can't bolt an Escape binding on here -
     Ctrl+C/Ctrl+Q still cancel via questionary's own bindings."""
+    _require_tty(message)
     answer = questionary.confirm(message, default=default, auto_enter=True).ask()
     return bool(answer)
 
@@ -741,7 +767,7 @@ def recommend() -> None:
         ranked = predictor.rank_candidates(artifact, info)
         viable = [(c, speed) for c, speed in ranked if speed > 0][:10]
         if not viable:
-            console.print("[red]No model is predicted to run on this hardware.[/red]")
+            err_console.print("[red]No model is predicted to run on this hardware.[/red]")
             raise typer.Exit(1)
 
         refs = [f"{c['repo_id']}:{c['filename']}" for c, speed in viable]
@@ -755,7 +781,7 @@ def recommend() -> None:
         ]
         selected = _ask_select(questionary.select("Pick a model to install:", choices=choices))
         if selected is None:
-            console.print("[yellow]Cancelled.[/yellow]")
+            err_console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
         install(selected)
         return
@@ -777,7 +803,7 @@ def recommend() -> None:
     matches = rules_mod.matching_rules(rule_list, available_gb, has_gpu=has_gpu)
 
     if not matches:
-        console.print("[red]No model in the current rules fits this hardware.[/red]")
+        err_console.print("[red]No model in the current rules fits this hardware.[/red]")
         raise typer.Exit(1)
 
     session_cache.record_seen([r["name"] for r in matches])
@@ -787,7 +813,7 @@ def recommend() -> None:
     ]
     selected = _ask_select(questionary.select("Pick a model to install:", choices=choices))
     if selected is None:
-        console.print("[yellow]Cancelled.[/yellow]")
+        err_console.print("[yellow]Cancelled.[/yellow]")
         raise typer.Exit(0)
 
     install(selected)
@@ -830,7 +856,7 @@ def tune(
         try:
             resolved = resolve_model(model_name)
         except (AmbiguousModelError, ModelResolutionError) as error:
-            console.print(f"[red]{error}[/red]")
+            err_console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
         candidate = {
             "name": resolved.filename,
@@ -864,14 +890,14 @@ def _resolve_ref(arg: str) -> str:
 
     results = session_cache.load_last_results()
     if not results:
-        console.print(
+        err_console.print(
             "[red]Run `omm search` or `omm list` first to install/uninstall by number.[/red]"
         )
         raise typer.Exit(1)
 
     idx = int(arg)
     if idx < 1 or idx > len(results):
-        console.print(f"[red]No result #{idx} (1-{len(results)}).[/red]")
+        err_console.print(f"[red]No result #{idx} (1-{len(results)}).[/red]")
         raise typer.Exit(1)
 
     return results[idx - 1]
@@ -974,7 +1000,7 @@ def _link_model(dest, repo_id: str | None, ollama_tag: str) -> dict[str, bool]:
             linker.link_lmstudio(dest, repo_id)
             linked["lmstudio"] = True
         except linker.LinkError as e:
-            console.print(f"[yellow]LM Studio link skipped: {e}[/yellow]")
+            err_console.print(f"[yellow]LM Studio link skipped: {e}[/yellow]")
     else:
         console.print("[dim]LM Studio not detected, skipping link.[/dim]")
 
@@ -983,12 +1009,12 @@ def _link_model(dest, repo_id: str | None, ollama_tag: str) -> dict[str, bool]:
             has_chat_template = linker.link_ollama(dest, ollama_tag)
             linked["ollama"] = True
             if not has_chat_template:
-                console.print(
+                err_console.print(
                     "[yellow]This GGUF has no embedded chat template - "
                     "Ollama will fall back to raw completion (no chat formatting).[/yellow]"
                 )
         except linker.LinkError as e:
-            console.print(f"[yellow]Ollama link skipped: {e}[/yellow]")
+            err_console.print(f"[yellow]Ollama link skipped: {e}[/yellow]")
     else:
         console.print("[dim]Ollama not detected, skipping link.[/dim]")
 
@@ -1088,6 +1114,7 @@ def _install_impl(
     resolved,
     *,
     auto_upload: bool = False,
+    no_upload: bool = False,
     skip_unfit: bool = False,
     stop_event: threading.Event | None = None,
     use_quality_eval: bool = False,
@@ -1106,13 +1133,13 @@ def _install_impl(
         candidate = {"repo_id": repo_id, "filename": filename}
         speed = predictor.predict_speed(trees, hw, candidate)
         if speed <= 0:
-            console.print(
+            err_console.print(
                 f"[red]Warning: this hardware is predicted not to run {filename}.[/red]"
             )
             if skip_unfit:
                 return InstallOutcome(filename, repo_id, linked={}, skipped_unfit=True)
             if not _ask_confirm("Install anyway?"):
-                console.print("[yellow]Cancelled.[/yellow]")
+                err_console.print("[yellow]Cancelled.[/yellow]")
                 raise typer.Exit(0)
         else:
             try:
@@ -1126,7 +1153,7 @@ def _install_impl(
 
     dest = MODELS_DIR / filename
     if dest.exists():
-        console.print(f"[yellow]{filename} already downloaded, skipping fetch.[/yellow]")
+        err_console.print(f"[yellow]{filename} already downloaded, skipping fetch.[/yellow]")
     else:
         try:
             if stop_event is not None:
@@ -1136,7 +1163,7 @@ def _install_impl(
         except DownloadCancelled as e:
             raise ContributionStopped(filename) from e
         except DownloadError as e:
-            console.print(f"[red]{e}[/red]")
+            err_console.print(f"[red]{e}[/red]")
             raise typer.Exit(1) from e
 
     console.print("Verifying checksum...")
@@ -1236,8 +1263,10 @@ def _install_impl(
             console.print(f"[cyan]{tokens_per_sec:.1f} tok/s[/cyan]")
             _maybe_auto_calibrate(filename, repo_id, dest, tokens_per_sec)
 
-            want_upload = auto_upload or _resolve_upload_decision(
-                "Send this machine's benchmark result to the server?"
+            want_upload = not no_upload and (
+                auto_upload or _resolve_upload_decision(
+                    "Send this machine's benchmark result to the server?"
+                )
             )
             if want_upload:
                 telemetry_sent = _report_telemetry(
@@ -1269,6 +1298,19 @@ def _install_impl(
 @app.command()
 def install(
     model_name: str = typer.Argument(..., autocompletion=complete_install_name),
+    skip_unfit: bool = typer.Option(
+        False,
+        "--skip-unfit",
+        help="If this hardware is predicted not to run the model, skip it "
+        "instead of asking (exits 0 with skipped_unfit set). For scripting.",
+    ),
+    upload: bool | None = typer.Option(
+        None,
+        "--upload/--no-upload",
+        help="Send (or skip sending) this machine's benchmark result to the "
+        "telemetry server, without asking. Unset defers to the current "
+        "`omm setting upload` policy.",
+    ),
 ) -> None:
     """Download a model into the central hub and link it into installed engines."""
     model_name = _resolve_ref(model_name)
@@ -1277,16 +1319,21 @@ def install(
     except AmbiguousModelError as e:
         chosen = _pick_quant_variant(e)
         if chosen is None:
-            console.print("[yellow]Cancelled.[/yellow]")
+            err_console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
-        install(f"{e.repo_id}:{chosen}")
+        install(f"{e.repo_id}:{chosen}", skip_unfit=skip_unfit, upload=upload)
         return
     except ModelResolutionError as e:
-        console.print(f"[red]{e}[/red]")
+        err_console.print(f"[red]{e}[/red]")
         _print_install_suggestions(model_name)
         raise typer.Exit(1) from e
 
-    outcome = _install_impl(resolved)
+    outcome = _install_impl(
+        resolved,
+        skip_unfit=skip_unfit,
+        auto_upload=upload is True,
+        no_upload=upload is False,
+    )
 
     console.print(f"[green]Installed {outcome.filename}[/green]")
     if outcome.linked.get("ollama"):
@@ -1327,6 +1374,12 @@ def _remove_one(filename: str, entry: dict) -> None:
 @app.command(name="uninstall")
 def remove(
     filename: str = typer.Argument(..., autocompletion=complete_remove_filename),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Don't ask for confirmation before uninstalling `all`. For scripting.",
+    ),
 ) -> None:
     """Uninstall a model and clean up all symlinks/manifests. Pass `all` to
     uninstall every model installed via omm."""
@@ -1335,8 +1388,8 @@ def remove(
         if not reg:
             console.print("No models installed via omm yet.")
             raise typer.Exit(0)
-        if not _ask_confirm(f"Uninstall all {len(reg)} model(s)?"):
-            console.print("[yellow]Cancelled.[/yellow]")
+        if not yes and not _ask_confirm(f"Uninstall all {len(reg)} model(s)?"):
+            err_console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
         for name, entry in list(reg.items()):
             _remove_one(name, entry)
@@ -1352,7 +1405,7 @@ def remove(
         if _cleanup_incomplete_install(filename):
             console.print(f"[green]Cleaned up incomplete install of {filename}[/green]")
             raise typer.Exit(0)
-        console.print(f"[red]{filename} is not installed via omm. See `omm list`.[/red]")
+        err_console.print(f"[red]{filename} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)
 
     _remove_one(filename, entry)
@@ -1377,17 +1430,36 @@ def _entry_version(entry: dict) -> str:
 @app.command()
 def info(
     model_name: str = typer.Argument(..., autocompletion=complete_remove_filename),
+    json_output: bool = typer.Option(False, "--json", help="Print result as JSON instead of a table."),
 ) -> None:
     """Show name, version, size, and linked-program run commands for an installed model."""
     model_name = _resolve_ref(model_name)
     reg = registry.load_registry()
     filename, entry = _lookup_entry(model_name, reg)
     if entry is None:
-        console.print(f"[red]{model_name} is not installed via omm. See `omm list`.[/red]")
+        err_console.print(f"[red]{model_name} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)
 
     size_gb = entry.get("size_bytes", 0) / (1024**3)
     linked = entry.get("linked", {})
+
+    if json_output:
+        ollama_tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
+        console.print_json(
+            data={
+                "filename": filename,
+                "repo_id": entry.get("repo_id"),
+                "version": _entry_version(entry),
+                "size_bytes": entry.get("size_bytes", 0),
+                "installed_at": entry.get("installed_at", "unknown"),
+                "linked": {
+                    "lmstudio": bool(linked.get("lmstudio")),
+                    "ollama": bool(linked.get("ollama")),
+                },
+                "ollama_run_command": f"ollama run {ollama_tag}" if linked.get("ollama") else None,
+            }
+        )
+        return
 
     table = Table(title=filename, show_header=False)
     table.add_column("Field", style="cyan")
@@ -1422,7 +1494,7 @@ def _update_one(filename: str, entry: dict) -> str:
     if repo_id:
         remote_sha256 = remote_file_sha256(repo_id, filename)
         if remote_sha256 is None:
-            console.print(
+            err_console.print(
                 f"[yellow]{filename}: could not check for updates "
                 "(no repo/LFS info), skipped.[/yellow]"
             )
@@ -1434,20 +1506,20 @@ def _update_one(filename: str, entry: dict) -> str:
         try:
             download_file(url, dest)
         except DownloadError as e:
-            console.print(f"[red]{filename}: update download failed: {e}[/red]")
+            err_console.print(f"[red]{filename}: update download failed: {e}[/red]")
             return "skipped"
         new_sha256 = sha256_file(dest)
     else:
         source = entry.get("source")
         if not source:
-            console.print(f"[yellow]{filename}: no source URL on record, skipped.[/yellow]")
+            err_console.print(f"[yellow]{filename}: no source URL on record, skipped.[/yellow]")
             return "skipped"
 
         tmp = dest.with_name(dest.name + ".update")
         try:
             download_file(source, tmp)
         except DownloadError as e:
-            console.print(f"[red]{filename}: update download failed: {e}[/red]")
+            err_console.print(f"[red]{filename}: update download failed: {e}[/red]")
             tmp.unlink(missing_ok=True)
             tmp.with_suffix(tmp.suffix + ".part").unlink(missing_ok=True)
             return "skipped"
@@ -1475,6 +1547,12 @@ def _update_one(filename: str, entry: dict) -> str:
 @app.command()
 def upgrade(
     model_name: str = typer.Argument(None, autocompletion=complete_remove_filename),
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Don't ask for confirmation before checking all models. For scripting.",
+    ),
 ) -> None:
     """Refresh an installed model against its source, re-downloading only
     if the source has changed since install. With no argument (or `all`),
@@ -1485,8 +1563,8 @@ def upgrade(
         if not reg:
             console.print("No models installed via omm yet.")
             raise typer.Exit(0)
-        if not _ask_confirm(f"Check {len(reg)} model(s) for updates?"):
-            console.print("[yellow]Cancelled.[/yellow]")
+        if not yes and not _ask_confirm(f"Check {len(reg)} model(s) for updates?"):
+            err_console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
 
         counts = {"updated": 0, "up_to_date": 0, "skipped": 0}
@@ -1501,7 +1579,7 @@ def upgrade(
     resolved = _resolve_ref(model_name)
     filename, entry = _lookup_entry(resolved, reg)
     if entry is None:
-        console.print(f"[red]{resolved} is not installed via omm. See `omm list`.[/red]")
+        err_console.print(f"[red]{resolved} is not installed via omm. See `omm list`.[/red]")
         raise typer.Exit(1)
 
     result = _update_one(filename, entry)
@@ -1513,12 +1591,34 @@ def upgrade(
 
 
 @app.command(name="list")
-def list_models() -> None:
+def list_models(
+    json_output: bool = typer.Option(False, "--json", help="Print results as JSON instead of a table."),
+) -> None:
     """Show models installed via omm and their linked status."""
     reg = registry.load_registry()
     if not reg:
-        console.print("No models installed via omm yet. Try `omm recommend` or `omm install`.")
+        if json_output:
+            console.print_json(data=[])
+        else:
+            console.print("No models installed via omm yet. Try `omm recommend` or `omm install`.")
         raise typer.Exit(0)
+
+    if json_output:
+        rows = [
+            {
+                "index": idx,
+                "filename": filename,
+                "size_bytes": entry.get("size_bytes", 0),
+                "linked": {
+                    "lmstudio": bool(entry.get("linked", {}).get("lmstudio")),
+                    "ollama": bool(entry.get("linked", {}).get("ollama")),
+                },
+            }
+            for idx, (filename, entry) in enumerate(reg.items(), start=1)
+        ]
+        console.print_json(data=rows)
+        session_cache.record_results(list(reg.keys()))
+        return
 
     table = Table(title="omm models")
     table.add_column("#", justify="right")
@@ -1564,7 +1664,7 @@ def configure_ui(
     if mode is not None:
         normalized = mode.lower()
         if normalized not in {"compact", "detailed"}:
-            console.print("[red]UI mode must be compact or detailed.[/red]")
+            err_console.print("[red]UI mode must be compact or detailed.[/red]")
             raise typer.Exit(1)
         current = config_mod.update_config(ui_mode=normalized)
     console.print(f"UI mode: [cyan]{current.get('ui_mode', 'compact')}[/cyan]")
@@ -1585,7 +1685,7 @@ def configure_telemetry(
         if endpoint.lower() == "none":
             changes.update(telemetry_endpoint=None, telemetry_backend="local")
         elif not telemetry.secure_endpoint(endpoint):
-            console.print("[red]Use HTTPS, or HTTP only for localhost.[/red]")
+            err_console.print("[red]Use HTTPS, or HTTP only for localhost.[/red]")
             raise typer.Exit(1)
         else:
             changes.update(
@@ -1613,13 +1713,13 @@ def configure_upload(
     """Configure the benchmark-upload send policy; see `omm setting telemetry` for the destination."""
     chosen = [flag for flag in (enable, disable, ask) if flag]
     if len(chosen) > 1:
-        console.print("[red]Choose only one of --enable, --disable, or --ask.[/red]")
+        err_console.print("[red]Choose only one of --enable, --disable, or --ask.[/red]")
         raise typer.Exit(1)
     current = load_config()
     changes = {}
     if enable:
         if not current.get("telemetry_endpoint"):
-            console.print("[red]Set an endpoint with `omm setting telemetry --endpoint` before enabling uploads.[/red]")
+            err_console.print("[red]Set an endpoint with `omm setting telemetry --endpoint` before enabling uploads.[/red]")
             raise typer.Exit(1)
         changes["telemetry_send_policy"] = "always"
     elif disable:
@@ -1651,7 +1751,7 @@ def calibrate(
         if (entry.get("linked") or {}).get("ollama")
     ]
     if not eligible:
-        console.print("[red]No Ollama-linked omm models are installed.[/red]")
+        err_console.print("[red]No Ollama-linked omm models are installed.[/red]")
         raise typer.Exit(1)
     if model_name is None:
         filename, entry = min(eligible, key=lambda item: item[1].get("size_bytes") or 2**63)
@@ -1659,12 +1759,12 @@ def calibrate(
         resolved = _resolve_ref(model_name)
         filename, entry = _lookup_entry(resolved, reg)
         if entry is None or not (entry.get("linked") or {}).get("ollama"):
-            console.print(f"[red]{resolved} is not linked to Ollama.[/red]")
+            err_console.print(f"[red]{resolved} is not linked to Ollama.[/red]")
             raise typer.Exit(1)
 
     artifact = predictor.load_cached_model()
     if not artifact or not artifact.get("trees"):
-        console.print("[red]No cached recommendation model is available.[/red]")
+        err_console.print("[red]No cached recommendation model is available.[/red]")
         raise typer.Exit(1)
     hardware = scan_hardware()
     candidate = {
@@ -1680,12 +1780,12 @@ def calibrate(
         apply_calibration=False,
     )
     if predicted <= 0:
-        console.print("[red]This model has no usable baseline speed prediction.[/red]")
+        err_console.print("[red]This model has no usable baseline speed prediction.[/red]")
         raise typer.Exit(1)
     tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
     measured = benchmark.benchmark_ollama(tag)
     if measured is None or measured <= 0:
-        console.print("[red]Calibration requires a running Ollama model server.[/red]")
+        err_console.print("[red]Calibration requires a running Ollama model server.[/red]")
         raise typer.Exit(1)
     factor = calibration.record_calibration(
         hardware,
@@ -1707,12 +1807,12 @@ def catalog_trust(
 ) -> None:
     """Require future recommendation downloads to pass signature verification."""
     if not manifest_url.startswith("https://"):
-        console.print("[red]The signed catalog manifest must use HTTPS.[/red]")
+        err_console.print("[red]The signed catalog manifest must use HTTPS.[/red]")
         raise typer.Exit(1)
     try:
         fingerprint = catalog.public_key_fingerprint(public_key)
     except catalog.CatalogVerificationError as error:
-        console.print(f"[red]{error}[/red]")
+        err_console.print(f"[red]{error}[/red]")
         raise typer.Exit(1) from error
     config_mod.update_config(
         catalog_manifest_url=manifest_url,
@@ -1747,7 +1847,7 @@ def catalog_rollback() -> None:
     try:
         selected = catalog.rollback()
     except (OSError, ValueError) as error:
-        console.print(f"[red]Catalog rollback failed: {error}[/red]")
+        err_console.print(f"[red]Catalog rollback failed: {error}[/red]")
         raise typer.Exit(1) from error
     console.print(f"[green]Rolled back recommendation catalog from {selected.name}.[/green]")
 
@@ -1822,7 +1922,10 @@ def setting_menu(ctx: typer.Context) -> None:
 
 
 @app.command()
-def search(query: str) -> None:
+def search(
+    query: str,
+    json_output: bool = typer.Option(False, "--json", help="Print results as JSON instead of a table."),
+) -> None:
     """Search curated models, cached candidates, and HuggingFace by name."""
     config = load_config()
     pool = search_mod.local_candidate_pool(config.get("model_url"))
@@ -1837,11 +1940,12 @@ def search(query: str) -> None:
 
     combined = search_mod.dedupe_by_base_repo(local_matches + hf_matches)
     if not combined:
-        console.print(f"[yellow]No models found matching '{query}'.[/yellow]")
+        err_console.print(f"[yellow]No models found matching '{query}'.[/yellow]")
         raise typer.Exit(1)
 
-    # No network call here - only score against whatever's already cached
-    # locally, same as install completion.
+    # Score against whatever's already cached locally, same as install
+    # completion - the only network calls are the lazy per-repo param-count
+    # fallback below, for repo names too unusual to parse.
     artifact = predictor.load_cached_model()
     trees = artifact.get("trees") if artifact else None
     hw = scan_hardware() if trees else None
@@ -1849,8 +1953,10 @@ def search(query: str) -> None:
     groups = search_mod.group_by_family(combined)
     refs: list[str] = []
     seen_refs: set[str] = set()
+    rows: list[dict] = []
     for family in sorted(groups):
-        console.print(f"[bold cyan]==> {family}[/bold cyan]")
+        if not json_output:
+            console.print(f"[bold cyan]==> {family}[/bold cyan]")
         for c in groups[family]:
             ref = search_mod.install_ref(c)
             if ref in seen_refs:
@@ -1858,13 +1964,43 @@ def search(query: str) -> None:
             seen_refs.add(ref)
             refs.append(ref)
             desc = c.get("description") or ""
-            if trees is not None and predictor.predict_speed(trees, hw, c) <= 0:
-                console.print(f"  [{len(refs)}] [red]{ref}  (predicted not to run on this hardware)[/red]")
-            else:
+            candidate = c
+            if (
+                trees is not None
+                and c.get("repo_id")
+                and candidate_parameter_count_billions(c) is None
+            ):
+                # Filename/repo-id parsing found no param count (e.g. a repo
+                # branded "DeepSeek-V4-Flash" instead of "...-70B"). Without
+                # this, estimate_required_memory_gb can't tell "fits" from
+                # "unknown", and the "predicted not to run" warning silently
+                # never fires for exactly the huge models that most need it.
+                param_count_b = fetch_repo_param_count_b(c["repo_id"])
+                if param_count_b is not None:
+                    candidate = {**c, "parameter_count_b": param_count_b}
+            fits_hardware = not (
+                trees is not None and predictor.predict_speed(trees, hw, candidate) <= 0
+            )
+            if json_output:
+                rows.append(
+                    {
+                        "index": len(refs),
+                        "family": family,
+                        "ref": ref,
+                        "description": desc,
+                        "fits_hardware": fits_hardware,
+                    }
+                )
+            elif fits_hardware:
                 console.print(f"  [{len(refs)}] {ref}  [dim]{desc}[/dim]")
-        console.print()
+            else:
+                console.print(f"  [{len(refs)}] [red]{ref}  (predicted not to run on this hardware)[/red]")
+        if not json_output:
+            console.print()
 
     session_cache.record_results(refs)
+    if json_output:
+        console.print_json(data=rows)
 
 
 def _print_install_suggestions(query: str) -> None:
@@ -1886,9 +2022,9 @@ def _print_install_suggestions(query: str) -> None:
     if not suggestions:
         return
 
-    console.print("[yellow]Did you mean one of these?[/yellow]")
+    err_console.print("[yellow]Did you mean one of these?[/yellow]")
     for s in suggestions:
-        console.print(f"  - {search_mod.install_ref(s)}")
+        err_console.print(f"  - {search_mod.install_ref(s)}")
 
 
 @app.command(name="link")
@@ -1924,7 +2060,7 @@ def link_models(
             try:
                 destination = linker.link_custom_directory(source, directory)
             except linker.LinkError as error:
-                console.print(f"[yellow]{filename}: custom link skipped: {error}[/yellow]")
+                err_console.print(f"[yellow]{filename}: custom link skipped: {error}[/yellow]")
                 continue
             custom_links = list(entry.get("custom_links") or [])
             if str(destination) not in custom_links:
@@ -1959,7 +2095,7 @@ def link_models(
                 new_linked["lmstudio"] = True
                 changed = True
             except linker.LinkError as e:
-                console.print(f"[yellow]{filename}: LM Studio link skipped: {e}[/yellow]")
+                err_console.print(f"[yellow]{filename}: LM Studio link skipped: {e}[/yellow]")
 
         if ollama_installed:
             ollama_tag = entry.get("ollama_name") or linker.sanitize_ollama_tag(filename)
@@ -1969,7 +2105,7 @@ def link_models(
                 update_fields["ollama_name"] = ollama_tag
                 changed = True
             except linker.LinkError as e:
-                console.print(f"[yellow]{filename}: Ollama link skipped: {e}[/yellow]")
+                err_console.print(f"[yellow]{filename}: Ollama link skipped: {e}[/yellow]")
 
         if changed:
             registry.upsert_entry(filename, linked=new_linked, **update_fields)
@@ -1984,7 +2120,7 @@ def link_models(
 @app.command(name="relink", hidden=True)
 def relink() -> None:
     """Deprecated alias for `omm link`."""
-    console.print("[yellow]`omm relink` is deprecated; use `omm link`.[/yellow]")
+    err_console.print("[yellow]`omm relink` is deprecated; use `omm link`.[/yellow]")
     link_models(directory=None)
 
 
@@ -2061,10 +2197,10 @@ def benchmark_cmd(
         ):
             started_daemon = benchmark.start_ollama_daemon()
             if started_daemon is None:
-                console.print("[red]Couldn't start the Ollama daemon.[/red]")
+                err_console.print("[red]Couldn't start the Ollama daemon.[/red]")
                 raise typer.Exit(1)
         else:
-            console.print("[red]Ollama is not running at http://localhost:11434.[/red]")
+            err_console.print("[red]Ollama is not running at http://localhost:11434.[/red]")
             raise typer.Exit(1)
     if output is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -2079,7 +2215,7 @@ def benchmark_cmd(
             )
             quality_mod.write_evidence(report, output)
         except quality_mod.QualityEvaluationError as error:
-            console.print(f"[red]{error}[/red]")
+            err_console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
 
         table = Table(title="Localfit reproducible quality evidence")
@@ -2416,7 +2552,7 @@ def _run_contribution_loop(
                 _remove_one(fn, entry)
             break
         except (DownloadError, linker.LinkError) as e:
-            console.print(f"[yellow]Skipping {candidate['filename']}: {e}[/yellow]")
+            err_console.print(f"[yellow]Skipping {candidate['filename']}: {e}[/yellow]")
             continue
 
         if outcome.skipped_unfit:
@@ -2472,41 +2608,48 @@ def _print_contribution_summary(
 
 
 @app.command()
-def contribute() -> None:
+def contribute(
+    yes: bool = typer.Option(
+        False,
+        "--yes",
+        "-y",
+        help="Don't ask for confirmation before starting. For scripting/unattended runs.",
+    ),
+) -> None:
     """Repeatedly install, benchmark, and upload telemetry for hardware-fit
     models until Esc is pressed, to help grow the training dataset behind
     `omm recommend`. Deletes each model after benchmarking it (even
     successful ones) to keep disk usage bounded."""
     policy = load_config().get("telemetry_send_policy", "ask")
     if policy == "never":
-        console.print(
+        err_console.print(
             "[red]omm contribute requires benchmark uploads to be enabled. "
             "Run `omm setting upload --enable` or `--ask` first.[/red]"
         )
         raise typer.Exit(1)
     if policy == "always" and not load_config().get("contribute_always_ack"):
-        console.print(
+        err_console.print(
             "[yellow]Upload policy is 'always' - every benchmark result from this "
             "and future omm contribute runs will be sent to the server without "
             "asking each time.[/yellow]"
         )
-        if not _ask_confirm("Continue?"):
-            console.print("[yellow]Cancelled.[/yellow]")
+        if not yes and not _ask_confirm("Continue?"):
+            err_console.print("[yellow]Cancelled.[/yellow]")
             raise typer.Exit(0)
         config_mod.update_config(contribute_always_ack=True)
 
-    console.print(
+    err_console.print(
         "[yellow]This will repeatedly download, benchmark, and delete GGUF models "
         "until you press Esc. It uses real bandwidth, disk space, and compute, "
         "runs unattended (no per-model confirmation), and uploads every benchmark "
         f"result to the server per your current upload policy ({policy}).[/yellow]"
     )
-    if not _ask_confirm("Start contributing compute now?"):
-        console.print("[yellow]Cancelled.[/yellow]")
+    if not yes and not _ask_confirm("Start contributing compute now?"):
+        err_console.print("[yellow]Cancelled.[/yellow]")
         raise typer.Exit(0)
 
     if not benchmark.ollama_daemon_reachable():
-        console.print(
+        err_console.print(
             "[red]omm contribute requires a running Ollama daemon - "
             "it's the only benchmarkable engine right now.[/red]"
         )
@@ -2515,13 +2658,13 @@ def contribute() -> None:
     try:
         quality_pack, _ = quality_mod.load_pack()
     except quality_mod.QualityEvaluationError as error:
-        console.print(f"[red]Could not load the quality pack: {error}[/red]")
+        err_console.print(f"[red]Could not load the quality pack: {error}[/red]")
         raise typer.Exit(1) from error
 
     config = load_config()
     artifact, _ = _load_recommendation_with_change_note(config)
     if not artifact or not artifact.get("candidates"):
-        console.print(
+        err_console.print(
             "[red]No trained recommendation model available - can't select candidates.[/red]"
         )
         raise typer.Exit(1)

@@ -75,7 +75,7 @@ def test_setting_catalog_rollback_reports_error_with_no_snapshots(isolated_omm_h
     result = runner.invoke(cli.app, ["setting", "catalog-rollback"])
 
     assert result.exit_code == 1
-    assert "Catalog rollback failed" in result.stdout
+    assert "Catalog rollback failed" in result.stderr
 
 
 def test_old_top_level_commands_are_removed(isolated_omm_home):
