@@ -100,7 +100,9 @@ def _omm_version() -> str:
 def _root(ctx: typer.Context) -> None:
     _maybe_start_update_check(ctx)
     if ctx.invoked_subcommand is None:
-        console.print(f"omm {_omm_version()}")
+        commit = _installed_commit()
+        suffix = f" ({commit[:7]})" if commit else ""
+        console.print(f"omm {_omm_version()}{suffix}")
         raise typer.Exit(0)
     _maybe_auto_import(ctx)
     resent = telemetry.flush_pending()

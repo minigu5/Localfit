@@ -214,6 +214,8 @@ def test_update_refreshes_stale_cache_with_live_remote_head(monkeypatch):
 
 
 def test_installed_commit_reads_vcs_info_from_direct_url_json(monkeypatch):
+    monkeypatch.setattr(cli, "_src_head_commit", lambda: None)
+
     class _FakeDist:
         def read_text(self, name):
             assert name == "direct_url.json"
@@ -225,6 +227,8 @@ def test_installed_commit_reads_vcs_info_from_direct_url_json(monkeypatch):
 
 
 def test_installed_commit_returns_none_for_editable_dev_install(monkeypatch):
+    monkeypatch.setattr(cli, "_src_head_commit", lambda: None)
+
     class _FakeDist:
         def read_text(self, name):
             return '{"dir_info": {"editable": true}, "url": "file:///repo"}'
@@ -235,6 +239,8 @@ def test_installed_commit_returns_none_for_editable_dev_install(monkeypatch):
 
 
 def test_installed_commit_returns_none_when_package_not_found(monkeypatch):
+    monkeypatch.setattr(cli, "_src_head_commit", lambda: None)
+
     def _raise(name):
         raise cli.importlib.metadata.PackageNotFoundError(name)
 
