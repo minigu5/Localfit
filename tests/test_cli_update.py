@@ -274,31 +274,34 @@ def test_remote_head_commit_parses_git_ls_remote_output(monkeypatch):
     assert cli._remote_head_commit() == "abcdef1234567890"
 
 
-def test_deps_satisfied_true_when_pip_check_passes(monkeypatch):
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda args, **kwargs: subprocess.CompletedProcess(args, 0, stdout="No broken requirements found.\n"),
+def test_deps_satisfied_true_when_all_declared_deps_importable(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = [\n    "click>=8.1",\n    "rich>=13",\n]\n'
     )
+    monkeypatch.setattr(cli, "SRC_DIR", tmp_path)
+    monkeypatch.setattr(cli.importlib.metadata, "version", lambda name: "1.0")
 
     assert cli._deps_satisfied() is True
 
 
-def test_deps_satisfied_false_when_pip_check_reports_missing_dep(monkeypatch):
-    monkeypatch.setattr(
-        cli.subprocess,
-        "run",
-        lambda args, **kwargs: subprocess.CompletedProcess(args, 1, stdout="omm 0.1.0 requires psutil, which is not installed.\n"),
+def test_deps_satisfied_false_when_a_declared_dep_is_missing(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text(
+        'dependencies = [\n    "click>=8.1",\n    "rich>=13",\n]\n'
     )
+    monkeypatch.setattr(cli, "SRC_DIR", tmp_path)
+
+    def _version(name):
+        if name == "click":
+            raise cli.importlib.metadata.PackageNotFoundError(name)
+        return "1.0"
+
+    monkeypatch.setattr(cli.importlib.metadata, "version", _version)
 
     assert cli._deps_satisfied() is False
 
 
-def test_deps_satisfied_false_when_pipx_missing(monkeypatch):
-    def _raise(*args, **kwargs):
-        raise FileNotFoundError("pipx")
-
-    monkeypatch.setattr(cli.subprocess, "run", _raise)
+def test_deps_satisfied_false_when_pyproject_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(cli, "SRC_DIR", tmp_path)
 
     assert cli._deps_satisfied() is False
 

@@ -4,6 +4,7 @@ import importlib.metadata
 import json
 import math
 import platform
+import re
 import shutil
 import subprocess
 import sys
@@ -536,19 +537,43 @@ def _run_pipx_install(args: list[str], progress: Progress, task_id) -> subproces
     return subprocess.CompletedProcess(args, returncode, stdout=output, stderr=output)
 
 
-def _deps_satisfied() -> bool:
-    """True if the installed omm's declared dependencies are all present,
-    per `pip check` against the pipx-managed venv (no network, <0.2s)."""
+def _declared_dependency_names() -> list[str] | None:
+    """Package names from the freshly-pulled SRC_DIR/pyproject.toml's
+    [project] dependencies, or None if the file can't be read/parsed."""
     try:
-        result = subprocess.run(
-            ["pipx", "runpip", "omm", "check"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+        text = (SRC_DIR / "pyproject.toml").read_text()
+    except OSError:
+        return None
+    match = re.search(r"dependencies\s*=\s*\[(.*?)\]", text, re.DOTALL)
+    if not match:
+        return None
+    names = []
+    for spec in re.findall(r'"([^"]+)"', match.group(1)):
+        name = re.split(r"[<>=!~;\s\[]", spec, maxsplit=1)[0]
+        if name:
+            names.append(name)
+    return names
+
+
+def _deps_satisfied() -> bool:
+    """True if every dependency declared in the freshly-pulled
+    pyproject.toml is importable in this venv (no network, <0.05s).
+
+    Checks against the live pyproject.toml rather than `pip check`:
+    an editable install's dist-info is frozen at the last full `pipx
+    install`, so `pip check` (which only validates consistency between
+    already-installed packages) can't see a dependency that was newly
+    added to source since then - it always reports satisfied, so
+    `omm update` would silently skip installing it."""
+    names = _declared_dependency_names()
+    if names is None:
         return False
-    return result.returncode == 0
+    for name in names:
+        try:
+            importlib.metadata.version(name)
+        except importlib.metadata.PackageNotFoundError:
+            return False
+    return True
 
 
 def _run_pipx_install_with_progress(args: list[str]) -> subprocess.CompletedProcess:
