@@ -4,7 +4,7 @@ import json
 
 from typer.testing import CliRunner
 
-from omm import cli, config
+from omm import cli, config, registry
 from omm.hardware import HardwareInfo
 
 runner = CliRunner()
@@ -121,6 +121,37 @@ def test_benchmark_uploads_without_confirm_when_policy_always(isolated_omm_home,
 
     assert result.exit_code == 0, result.stdout
     assert len(sent) == 1
+
+
+def test_benchmark_resolves_numeric_arg_to_ollama_tag(isolated_omm_home, monkeypatch):
+    filename = "small.gguf"
+    registry.save_registry({filename: {"ollama_name": "small:latest", "linked": {}}})
+    monkeypatch.setattr(cli.session_cache, "load_last_results", lambda: [filename])
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+    seen = {}
+
+    def fake_collect_evidence(models, *a, **k):
+        seen["models"] = models
+        raise cli.quality_mod.QualityEvaluationError("stop here, we only care about the arg")
+
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", fake_collect_evidence)
+
+    runner.invoke(cli.app, ["benchmark", "1"])
+
+    assert seen["models"] == ["small:latest"]
+
+
+def test_benchmark_numeric_arg_without_ollama_tag(isolated_omm_home, monkeypatch):
+    filename = "small.gguf"
+    registry.save_registry({filename: {"linked": {}}})
+    monkeypatch.setattr(cli.session_cache, "load_last_results", lambda: [filename])
+
+    result = runner.invoke(cli.app, ["benchmark", "1"])
+
+    assert result.exit_code == 1
+    assert "no Ollama tag" in result.stderr
 
 
 def test_benchmark_stops_when_ollama_is_not_running(isolated_omm_home, monkeypatch):

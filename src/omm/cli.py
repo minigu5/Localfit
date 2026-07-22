@@ -903,6 +903,20 @@ def _resolve_ref(arg: str) -> str:
     return results[idx - 1]
 
 
+def _resolve_benchmark_tag(arg: str) -> str:
+    """Like `_resolve_ref`, but a numbered ref names a filename from the last
+    `omm search`/`omm list`, which `omm benchmark` needs as an Ollama tag."""
+    if not arg.isdigit():
+        return arg
+    filename = _resolve_ref(arg)
+    entry = registry.load_registry().get(filename)
+    tag = entry.get("ollama_name") if entry else None
+    if not tag:
+        err_console.print(f"[red]{filename} has no Ollama tag; link it with `omm link` first.[/red]")
+        raise typer.Exit(1)
+    return tag
+
+
 def _predicted_fastest_filenames(
     variants: list[QuantVariant],
     repo_id: str | None,
@@ -2190,6 +2204,7 @@ def benchmark_cmd(
     ),
 ) -> None:
     """Measure a small reproducible quality pack and decode speed."""
+    models = [_resolve_benchmark_tag(m) for m in models]
     started_daemon = None
     if not benchmark.ollama_daemon_reachable():
         if _stdin_is_tty() and _ask_confirm(
