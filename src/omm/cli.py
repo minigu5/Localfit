@@ -193,6 +193,29 @@ def _install_spec() -> str:
     return f"{SRC_DIR}[nvidia]"
 
 
+def _shorten_home(path: Path) -> str:
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _link_repair_needed(reg: dict) -> bool:
+    """True if some omm-hub model isn't yet symlinked into an installed
+    engine (e.g. Ollama/LM Studio was installed after the model was)."""
+    lmstudio_installed = linker.is_lmstudio_installed()
+    ollama_installed = linker.is_ollama_installed()
+    for filename, entry in reg.items():
+        if not (MODELS_DIR / filename).exists():
+            continue
+        linked = entry.get("linked", {})
+        if lmstudio_installed and not linked.get("lmstudio"):
+            return True
+        if ollama_installed and not linked.get("ollama"):
+            return True
+    return False
+
+
 @app.command()
 def scan() -> None:
     """Scan current PC hardware (RAM, VRAM, OS) and print a summary table."""
@@ -221,6 +244,48 @@ def scan() -> None:
         table.add_row("GPU", "None detected (no NVIDIA GPU found)")
 
     console.print(table)
+
+    engine_table = Table(title="Local AI runners")
+    engine_table.add_column("Program", style="cyan")
+    engine_table.add_column("Status", style="white")
+    engine_table.add_row(
+        "Ollama", "[green]installed[/green]" if linker.is_ollama_installed() else "not detected"
+    )
+    engine_table.add_row(
+        "LM Studio",
+        "[green]installed[/green]" if linker.is_lmstudio_installed() else "not detected",
+    )
+    console.print()
+    console.print(engine_table)
+
+    reg = registry.load_registry()
+    external = scan_import.find_external_models()
+
+    model_table = Table(title="Local AI models")
+    model_table.add_column("Model", style="cyan")
+    model_table.add_column("Location", style="white")
+    model_table.add_column("Engine(s)")
+    model_table.add_column("Managed by omm")
+    for filename, entry in reg.items():
+        linked = entry.get("linked", {})
+        engines = [name for name, on in linked.items() if on]
+        model_table.add_row(filename, "(omm hub)", ", ".join(engines) or "-", "[green]yes[/green]")
+    for item in external:
+        model_table.add_row(item.display_name, _shorten_home(item.path), item.engine, "no")
+    console.print()
+    console.print(model_table)
+
+    if _link_repair_needed(reg):
+        console.print()
+        console.print(
+            "[yellow]Some omm-hub models aren't linked into an installed engine yet. "
+            "Run:[/yellow] [bold]omm link[/bold]"
+        )
+    if external:
+        console.print()
+        console.print(
+            "[yellow]Found model file(s) outside the omm hub. Run:[/yellow] [bold]omm import[/bold]"
+        )
 
 
 def _refresh_data() -> None:
