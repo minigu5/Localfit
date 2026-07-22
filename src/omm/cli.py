@@ -70,7 +70,7 @@ app = typer.Typer(
 )
 setting_app = typer.Typer(
     name="setting",
-    help="View or change omm settings (UI mode, telemetry, catalog trust).",
+    help="View or change omm settings (UI mode, telemetry, upload policy, catalog trust).",
     invoke_without_command=True,
 )
 app.add_typer(setting_app)
@@ -1400,15 +1400,8 @@ def configure_telemetry(
         "--endpoint",
         help="Self-hosted HTTPS endpoint, localhost URL, or 'none' to clear it.",
     ),
-    enable: bool = typer.Option(False, "--enable", help="Always send benchmark results without asking."),
-    disable: bool = typer.Option(False, "--disable", help="Never send benchmark results."),
-    ask: bool = typer.Option(False, "--ask", help="Ask every time before sending (default)."),
 ) -> None:
-    """Configure optional uploads; the default remains asking every time."""
-    chosen = [flag for flag in (enable, disable, ask) if flag]
-    if len(chosen) > 1:
-        console.print("[red]Choose only one of --enable, --disable, or --ask.[/red]")
-        raise typer.Exit(1)
+    """Configure where benchmark telemetry is sent; see `omm setting upload` for the send policy."""
     current = load_config()
     changes = {}
     if endpoint is not None:
@@ -1424,10 +1417,32 @@ def configure_telemetry(
                     "firebase_legacy" if "firebaseio.com" in endpoint else "self_hosted"
                 ),
             )
-    prospective_endpoint = changes.get("telemetry_endpoint", current.get("telemetry_endpoint"))
+    if changes:
+        current = config_mod.update_config(**changes)
+    table = Table(title="Telemetry destination", show_header=False)
+    table.add_column("Field", style="cyan")
+    table.add_column("Value")
+    table.add_row("Backend", str(current.get("telemetry_backend") or "local"))
+    table.add_row("Endpoint", str(current.get("telemetry_endpoint") or "not configured"))
+    console.print(table)
+
+
+@setting_app.command(name="upload")
+def configure_upload(
+    enable: bool = typer.Option(False, "--enable", help="Always send benchmark results without asking."),
+    disable: bool = typer.Option(False, "--disable", help="Never send benchmark results."),
+    ask: bool = typer.Option(False, "--ask", help="Ask every time before sending (default)."),
+) -> None:
+    """Configure the benchmark-upload send policy; see `omm setting telemetry` for the destination."""
+    chosen = [flag for flag in (enable, disable, ask) if flag]
+    if len(chosen) > 1:
+        console.print("[red]Choose only one of --enable, --disable, or --ask.[/red]")
+        raise typer.Exit(1)
+    current = load_config()
+    changes = {}
     if enable:
-        if not prospective_endpoint:
-            console.print("[red]Set --endpoint before enabling uploads.[/red]")
+        if not current.get("telemetry_endpoint"):
+            console.print("[red]Set an endpoint with `omm setting telemetry --endpoint` before enabling uploads.[/red]")
             raise typer.Exit(1)
         changes["telemetry_send_policy"] = "always"
     elif disable:
@@ -1436,13 +1451,11 @@ def configure_telemetry(
         changes["telemetry_send_policy"] = "ask"
     if changes:
         current = config_mod.update_config(**changes)
-    table = Table(title="Benchmark data policy", show_header=False)
+    table = Table(title="Benchmark upload policy", show_header=False)
     table.add_column("Field", style="cyan")
     table.add_column("Value")
     policy = current.get("telemetry_send_policy", "ask")
     table.add_row("Uploads", {"always": "always", "never": "never", "ask": "ask (default)"}[policy])
-    table.add_row("Backend", str(current.get("telemetry_backend") or "local"))
-    table.add_row("Endpoint", str(current.get("telemetry_endpoint") or "not configured"))
     console.print(table)
 
 
@@ -1574,6 +1587,7 @@ def setting_menu(ctx: typer.Context) -> None:
                 choices=[
                     questionary.Choice("UI mode", value="ui"),
                     questionary.Choice("Telemetry", value="telemetry"),
+                    questionary.Choice("Upload", value="upload"),
                     questionary.Choice("Calibrate", value="calibrate"),
                     questionary.Choice("Catalog trust", value="catalog-trust"),
                     questionary.Choice("Catalog status", value="catalog-status"),
@@ -1594,6 +1608,8 @@ def setting_menu(ctx: typer.Context) -> None:
             endpoint = questionary.text(
                 "Endpoint (blank to keep current, 'none' to clear):"
             ).ask()
+            configure_telemetry(endpoint=endpoint or None)
+        elif choice == "upload":
             action = _ask_select(
                 questionary.select(
                     "Uploads:",
@@ -1606,8 +1622,7 @@ def setting_menu(ctx: typer.Context) -> None:
                 )
             )
             if action is not None:
-                configure_telemetry(
-                    endpoint=endpoint or None,
+                configure_upload(
                     enable=(action == "enable"),
                     disable=(action == "disable"),
                     ask=(action == "ask"),
@@ -2147,7 +2162,7 @@ def contribute() -> None:
     if policy == "never":
         console.print(
             "[red]omm contribute requires benchmark uploads to be enabled. "
-            "Run `omm setting telemetry --enable` or `--ask` first.[/red]"
+            "Run `omm setting upload --enable` or `--ask` first.[/red]"
         )
         raise typer.Exit(1)
     if policy == "always" and not load_config().get("contribute_always_ack"):
