@@ -5,7 +5,18 @@ from omm import cli, config
 runner = CliRunner()
 
 
-def test_telemetry_requires_explicit_endpoint_before_opt_in(isolated_omm_home):
+def test_telemetry_enable_uses_default_firebase_endpoint(isolated_omm_home):
+    result = runner.invoke(cli.app, ["setting", "telemetry", "--enable"])
+
+    assert result.exit_code == 0, result.stdout
+    saved = config.load_config()
+    assert saved["telemetry_endpoint"] == config.LEGACY_FIREBASE_ENDPOINT
+    assert saved["telemetry_send_policy"] == "always"
+
+
+def test_telemetry_requires_explicit_endpoint_before_opt_in_once_cleared(isolated_omm_home):
+    runner.invoke(cli.app, ["setting", "telemetry", "--endpoint", "none"])
+
     result = runner.invoke(cli.app, ["setting", "telemetry", "--enable"])
 
     assert result.exit_code == 1

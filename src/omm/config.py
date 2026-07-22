@@ -23,10 +23,12 @@ LEGACY_FIREBASE_ENDPOINT = (
 
 DEFAULT_CONFIG: dict[str, Any] = {
     "telemetry_send_policy": "ask",
-    # Local-only by default. Teams may configure the bundled FastAPI server;
-    # Firebase remains an explicit legacy compatibility option.
-    "telemetry_endpoint": None,
-    "telemetry_backend": "local",
+    # New installs point at our hosted Firebase collector by default. Existing
+    # configs that were already migrated to local-only (see _merge_config)
+    # are left untouched - this only affects users with no config.json yet.
+    # Teams may still point telemetry_endpoint at the bundled FastAPI server.
+    "telemetry_endpoint": LEGACY_FIREBASE_ENDPOINT,
+    "telemetry_backend": "firebase_legacy",
     "rules_url": None,
     "model_url": "https://raw.githubusercontent.com/minigu5/Localfit/main/published/recommend-model.json",
     "default_engine": None,
