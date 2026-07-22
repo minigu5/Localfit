@@ -1,6 +1,6 @@
 {
   "model_version": 3,
-  "trained_at": "2026-07-21T05:50:28.375788+00:00",
+  "trained_at": "2026-07-22T05:50:36.206486+00:00",
   "feature_order": [
     "ram_gb",
     "vram_gb",
@@ -56192,139 +56192,139 @@
       "name": "deepreinforce-ai-ornith-1.0-9b-gguf",
       "repo_id": "deepreinforce-ai/Ornith-1.0-9B-GGUF",
       "filename": "ornith-1.0-9b-Q4_K_M.gguf",
-      "description": "2,345,029 downloads on HuggingFace"
+      "description": "2,472,061 downloads on HuggingFace"
     },
     {
       "name": "deepreinforce-ai-ornith-1.0-35b-gguf",
       "repo_id": "deepreinforce-ai/Ornith-1.0-35B-GGUF",
       "filename": "ornith-1.0-35b-Q4_K_M.gguf",
-      "description": "1,868,506 downloads on HuggingFace"
+      "description": "1,961,336 downloads on HuggingFace"
     },
     {
       "name": "prism-ml-bonsai-27b-gguf",
       "repo_id": "prism-ml/Bonsai-27B-gguf",
       "filename": "Bonsai-27B-F16.gguf",
-      "description": "1,262,894 downloads on HuggingFace"
+      "description": "1,404,962 downloads on HuggingFace"
     },
     {
       "name": "unsloth-qwen-agentworld-35b-a3b-gguf",
       "repo_id": "unsloth/Qwen-AgentWorld-35B-A3B-GGUF",
       "filename": "Qwen-AgentWorld-35B-A3B-UD-Q4_K_M.gguf",
-      "description": "678,322 downloads on HuggingFace"
-    },
-    {
-      "name": "andycurrent-gemma-3-1b-it-glm-4.7-flash-heretic-uncensored-thinking_gguf",
-      "repo_id": "Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF",
-      "filename": "Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf",
-      "description": "526,876 downloads on HuggingFace"
-    },
-    {
-      "name": "hugging-quants-llama-3.2-1b-instruct-q8_0-gguf",
-      "repo_id": "hugging-quants/Llama-3.2-1B-Instruct-Q8_0-GGUF",
-      "filename": "llama-3.2-1b-instruct-q8_0.gguf",
-      "description": "519,898 downloads on HuggingFace"
+      "description": "698,937 downloads on HuggingFace"
     },
     {
       "name": "yuxinlu1-gemma-4-12b-agentic-fable5-composer2.5-v2-3.5x-tau2-gguf",
       "repo_id": "yuxinlu1/gemma-4-12B-agentic-fable5-composer2.5-v2-3.5x-tau2-GGUF",
       "filename": "gemma4-v2-Q4_K_M.gguf",
-      "description": "517,443 downloads on HuggingFace"
+      "description": "515,343 downloads on HuggingFace"
+    },
+    {
+      "name": "hugging-quants-llama-3.2-1b-instruct-q8_0-gguf",
+      "repo_id": "hugging-quants/Llama-3.2-1B-Instruct-Q8_0-GGUF",
+      "filename": "llama-3.2-1b-instruct-q8_0.gguf",
+      "description": "508,894 downloads on HuggingFace"
     },
     {
       "name": "unsloth-gpt-oss-20b-gguf",
       "repo_id": "unsloth/gpt-oss-20b-GGUF",
       "filename": "gpt-oss-20b-Q4_K_M.gguf",
-      "description": "467,642 downloads on HuggingFace"
-    },
-    {
-      "name": "yuxinlu1-gemma-4-12b-coder-fable5-composer2.5-v1-gguf",
-      "repo_id": "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF",
-      "filename": "gemma4-coding-Q4_K_M.gguf",
-      "description": "399,208 downloads on HuggingFace"
+      "description": "475,450 downloads on HuggingFace"
     },
     {
       "name": "prism-ml-ternary-bonsai-27b-gguf",
       "repo_id": "prism-ml/Ternary-Bonsai-27B-gguf",
       "filename": "Ternary-Bonsai-27B-F16.gguf",
-      "description": "338,945 downloads on HuggingFace"
+      "description": "432,196 downloads on HuggingFace"
+    },
+    {
+      "name": "andycurrent-gemma-3-1b-it-glm-4.7-flash-heretic-uncensored-thinking_gguf",
+      "repo_id": "Andycurrent/Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_GGUF",
+      "filename": "Gemma-3-1B-it-GLM-4.7-Flash-Heretic-Uncensored-Thinking_Q4_k_m.gguf",
+      "description": "404,795 downloads on HuggingFace"
+    },
+    {
+      "name": "yuxinlu1-gemma-4-12b-coder-fable5-composer2.5-v1-gguf",
+      "repo_id": "yuxinlu1/gemma-4-12B-coder-fable5-composer2.5-v1-GGUF",
+      "filename": "gemma4-coding-Q4_K_M.gguf",
+      "description": "367,170 downloads on HuggingFace"
     },
     {
       "name": "liquidai-lfm2.5-1.2b-instruct-gguf",
       "repo_id": "LiquidAI/LFM2.5-1.2B-Instruct-GGUF",
       "filename": "LFM2.5-1.2B-Instruct-Q4_K_M.gguf",
-      "description": "337,228 downloads on HuggingFace"
+      "description": "339,523 downloads on HuggingFace"
     },
     {
       "name": "unsloth-qwen3-coder-30b-a3b-instruct-gguf",
       "repo_id": "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF",
       "filename": "Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf",
-      "description": "310,600 downloads on HuggingFace"
+      "description": "311,738 downloads on HuggingFace"
     },
     {
       "name": "qwen-qwen3-4b-gguf",
       "repo_id": "Qwen/Qwen3-4B-GGUF",
       "filename": "Qwen3-4B-Q4_K_M.gguf",
-      "description": "302,636 downloads on HuggingFace"
+      "description": "297,646 downloads on HuggingFace"
     },
     {
       "name": "janhq-jan-v3.5-4b-gguf",
       "repo_id": "janhq/Jan-v3.5-4B-gguf",
       "filename": "Jan-v3.5-4B-Q4_K_M.gguf",
-      "description": "283,191 downloads on HuggingFace"
-    },
-    {
-      "name": "bartowski-llama-3.2-1b-instruct-gguf",
-      "repo_id": "bartowski/Llama-3.2-1B-Instruct-GGUF",
-      "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
-      "description": "276,407 downloads on HuggingFace"
+      "description": "285,395 downloads on HuggingFace"
     },
     {
       "name": "unsloth-qwen3-8b-gguf",
       "repo_id": "unsloth/Qwen3-8B-GGUF",
       "filename": "Qwen3-8B-Q4_K_M.gguf",
-      "description": "261,604 downloads on HuggingFace"
+      "description": "278,594 downloads on HuggingFace"
+    },
+    {
+      "name": "bartowski-llama-3.2-1b-instruct-gguf",
+      "repo_id": "bartowski/Llama-3.2-1B-Instruct-GGUF",
+      "filename": "Llama-3.2-1B-Instruct-Q4_K_M.gguf",
+      "description": "263,185 downloads on HuggingFace"
     },
     {
       "name": "ibm-granite-granite-4.1-3b-gguf",
       "repo_id": "ibm-granite/granite-4.1-3b-GGUF",
       "filename": "granite-4.1-3b-Q4_K_M.gguf",
-      "description": "225,777 downloads on HuggingFace"
-    },
-    {
-      "name": "lmstudio-community-llama-3.2-3b-instruct-gguf",
-      "repo_id": "lmstudio-community/Llama-3.2-3B-Instruct-GGUF",
-      "filename": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
-      "description": "223,168 downloads on HuggingFace"
-    },
-    {
-      "name": "qwen-qwen2.5-1.5b-instruct-gguf",
-      "repo_id": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
-      "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
-      "description": "208,984 downloads on HuggingFace"
+      "description": "226,528 downloads on HuggingFace"
     },
     {
       "name": "qwen-qwen2.5-coder-32b-instruct-gguf",
       "repo_id": "Qwen/Qwen2.5-Coder-32B-Instruct-GGUF",
       "filename": "qwen2.5-coder-32b-instruct-q4_k_m.gguf",
-      "description": "193,081 downloads on HuggingFace"
+      "description": "214,749 downloads on HuggingFace"
     },
     {
-      "name": "qwen-qwen2.5-3b-instruct-gguf",
-      "repo_id": "Qwen/Qwen2.5-3B-Instruct-GGUF",
-      "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
-      "description": "190,616 downloads on HuggingFace"
+      "name": "qwen-qwen2.5-1.5b-instruct-gguf",
+      "repo_id": "Qwen/Qwen2.5-1.5B-Instruct-GGUF",
+      "filename": "qwen2.5-1.5b-instruct-q4_k_m.gguf",
+      "description": "204,403 downloads on HuggingFace"
+    },
+    {
+      "name": "lmstudio-community-llama-3.2-3b-instruct-gguf",
+      "repo_id": "lmstudio-community/Llama-3.2-3B-Instruct-GGUF",
+      "filename": "Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+      "description": "203,725 downloads on HuggingFace"
     },
     {
       "name": "bartowski-gemma-2-2b-it-gguf",
       "repo_id": "bartowski/gemma-2-2b-it-GGUF",
       "filename": "gemma-2-2b-it-Q4_K_M.gguf",
-      "description": "189,899 downloads on HuggingFace"
+      "description": "184,289 downloads on HuggingFace"
+    },
+    {
+      "name": "qwen-qwen2.5-3b-instruct-gguf",
+      "repo_id": "Qwen/Qwen2.5-3B-Instruct-GGUF",
+      "filename": "qwen2.5-3b-instruct-q4_k_m.gguf",
+      "description": "182,778 downloads on HuggingFace"
     },
     {
       "name": "qwen-qwen2.5-coder-7b-instruct-gguf",
       "repo_id": "Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
       "filename": "qwen2.5-coder-7b-instruct-q4_k_m.gguf",
-      "description": "179,773 downloads on HuggingFace"
+      "description": "179,438 downloads on HuggingFace"
     }
   ]
 }
