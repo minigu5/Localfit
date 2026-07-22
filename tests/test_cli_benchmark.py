@@ -130,3 +130,44 @@ def test_benchmark_stops_when_ollama_is_not_running(isolated_omm_home, monkeypat
 
     assert result.exit_code == 1
     assert "Ollama is not running" in result.stdout
+
+
+def test_benchmark_declines_starting_daemon_when_prompted(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: False)
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+    monkeypatch.setattr(
+        cli.benchmark,
+        "start_ollama_daemon",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not start")),
+    )
+
+    result = runner.invoke(cli.app, ["benchmark", "small:latest"])
+
+    assert result.exit_code == 1
+    assert "Ollama is not running" in result.stdout
+
+
+def test_benchmark_starts_and_stops_daemon_when_confirmed(isolated_omm_home, monkeypatch):
+    reachable = {"value": False}
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: reachable["value"])
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", lambda *a, **k: _full_report())
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: True)
+
+    started = object()
+    stopped = []
+
+    def _start(*a, **k):
+        reachable["value"] = True
+        return started
+
+    monkeypatch.setattr(cli.benchmark, "start_ollama_daemon", _start)
+    monkeypatch.setattr(cli.benchmark, "stop_ollama_daemon", lambda proc: stopped.append(proc))
+
+    result = runner.invoke(cli.app, ["benchmark", "small:latest"])
+
+    assert result.exit_code == 0, result.stdout
+    assert stopped == [started]

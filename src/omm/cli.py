@@ -699,6 +699,10 @@ def _add_escape_to_cancel(question: questionary.Question) -> questionary.Questio
     return question
 
 
+def _stdin_is_tty() -> bool:
+    return sys.stdin.isatty()
+
+
 def _ask_select(question: questionary.Question):
     return _add_escape_to_cancel(question).ask()
 
@@ -2050,82 +2054,95 @@ def benchmark_cmd(
     ),
 ) -> None:
     """Measure a small reproducible quality pack and decode speed."""
+    started_daemon = None
     if not benchmark.ollama_daemon_reachable():
-        console.print("[red]Ollama is not running at http://localhost:11434.[/red]")
-        raise typer.Exit(1)
+        if _stdin_is_tty() and _ask_confirm(
+            "Ollama isn't running. Start it now, benchmark, then stop it afterward?"
+        ):
+            started_daemon = benchmark.start_ollama_daemon()
+            if started_daemon is None:
+                console.print("[red]Couldn't start the Ollama daemon.[/red]")
+                raise typer.Exit(1)
+        else:
+            console.print("[red]Ollama is not running at http://localhost:11434.[/red]")
+            raise typer.Exit(1)
     if output is None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         output = config_mod.EVALUATIONS_DIR / f"quality-{stamp}.json"
     try:
-        report = quality_mod.collect_evidence(
-            models,
-            scan_hardware(),
-            pack_path=pack,
-            speed_runs=speed_runs,
-        )
-        quality_mod.write_evidence(report, output)
-    except quality_mod.QualityEvaluationError as error:
-        console.print(f"[red]{error}[/red]")
-        raise typer.Exit(1) from error
+        try:
+            report = quality_mod.collect_evidence(
+                models,
+                scan_hardware(),
+                pack_path=pack,
+                speed_runs=speed_runs,
+            )
+            quality_mod.write_evidence(report, output)
+        except quality_mod.QualityEvaluationError as error:
+            console.print(f"[red]{error}[/red]")
+            raise typer.Exit(1) from error
 
-    table = Table(title="Localfit reproducible quality evidence")
-    table.add_column("Model", style="cyan")
-    table.add_column("Parameters")
-    table.add_column("Quantization")
-    table.add_column("Quality", justify="right")
-    table.add_column("Speed", justify="right")
-    for model in report["models"]:
-        model_quality = model["quality"]
-        table.add_row(
-            str(model["tag"]),
-            str(model.get("parameter_size") or "unknown"),
-            str(model.get("quantization_level") or "unknown"),
-            (
-                f"{model_quality['correct']}/{model_quality['total']} "
-                f"({model_quality['accuracy'] * 100:.1f}%)"
-            ),
-            f"{model['speed']['median_tokens_per_sec']:.1f} tok/s",
-        )
-    console.print(table)
-    console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
-    console.print(
-        "[dim]No generated text is stored. v6 telemetry includes CPU model, "
-        "architecture, and core counts; it excludes GPU names. "
-        "aggregate numbers may be shared below. Not a leaderboard.[/dim]"
-    )
-    if _resolve_upload_decision(
-        "Send these benchmark results to the server to help train the recommendation model?"
-    ):
-        registry_entries = registry.load_registry()
+        table = Table(title="Localfit reproducible quality evidence")
+        table.add_column("Model", style="cyan")
+        table.add_column("Parameters")
+        table.add_column("Quantization")
+        table.add_column("Quality", justify="right")
+        table.add_column("Speed", justify="right")
         for model in report["models"]:
-            entry = next(
-                (e for e in registry_entries.values() if e.get("ollama_name") == model["tag"]),
-                None,
+            model_quality = model["quality"]
+            table.add_row(
+                str(model["tag"]),
+                str(model.get("parameter_size") or "unknown"),
+                str(model.get("quantization_level") or "unknown"),
+                (
+                    f"{model_quality['correct']}/{model_quality['total']} "
+                    f"({model_quality['accuracy'] * 100:.1f}%)"
+                ),
+                f"{model['speed']['median_tokens_per_sec']:.1f} tok/s",
             )
-            samples = model["speed"]["samples_tokens_per_sec"]
-            _report_telemetry(
-                model["tag"],
-                entry.get("repo_id") if entry else None,
-                model["speed"]["median_tokens_per_sec"],
-                size_bytes=model.get("size_bytes"),
-                sample_count=model["speed"]["runs"],
-                speed_min=min(samples),
-                speed_max=max(samples),
-                quality={
-                    "pack_id": report["pack"]["id"],
-                    "pack_version": report["pack"]["version"],
-                    "correct": model["quality"]["correct"],
-                    "total": model["quality"]["total"],
-                    "accuracy": model["quality"]["accuracy"],
-                },
-                model_metadata=model,
-                runtime=model.get("runtime"),
-                engine_version=report.get("environment", {}).get("engine_version"),
-                model_filename=(entry or {}).get("filename") or model["tag"],
-                model_digest=model.get("digest"),
-            )
-    if json_output:
-        console.print_json(data=report)
+        console.print(table)
+        console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
+        console.print(
+            "[dim]No generated text is stored. v6 telemetry includes CPU model, "
+            "architecture, and core counts; it excludes GPU names. "
+            "aggregate numbers may be shared below. Not a leaderboard.[/dim]"
+        )
+        if _resolve_upload_decision(
+            "Send these benchmark results to the server to help train the recommendation model?"
+        ):
+            registry_entries = registry.load_registry()
+            for model in report["models"]:
+                entry = next(
+                    (e for e in registry_entries.values() if e.get("ollama_name") == model["tag"]),
+                    None,
+                )
+                samples = model["speed"]["samples_tokens_per_sec"]
+                _report_telemetry(
+                    model["tag"],
+                    entry.get("repo_id") if entry else None,
+                    model["speed"]["median_tokens_per_sec"],
+                    size_bytes=model.get("size_bytes"),
+                    sample_count=model["speed"]["runs"],
+                    speed_min=min(samples),
+                    speed_max=max(samples),
+                    quality={
+                        "pack_id": report["pack"]["id"],
+                        "pack_version": report["pack"]["version"],
+                        "correct": model["quality"]["correct"],
+                        "total": model["quality"]["total"],
+                        "accuracy": model["quality"]["accuracy"],
+                    },
+                    model_metadata=model,
+                    runtime=model.get("runtime"),
+                    engine_version=report.get("environment", {}).get("engine_version"),
+                    model_filename=(entry or {}).get("filename") or model["tag"],
+                    model_digest=model.get("digest"),
+                )
+        if json_output:
+            console.print_json(data=report)
+    finally:
+        if started_daemon is not None:
+            benchmark.stop_ollama_daemon(started_daemon)
 
 
 def _report_telemetry(

@@ -5,13 +5,17 @@ with built-in per-token timing) - LM Studio benchmarking can be added later.
 
 from __future__ import annotations
 
+import shutil
 import statistics
+import subprocess
+import time
 
 import requests
 
 OLLAMA_HOST = "http://localhost:11434"
 _BENCHMARK_PROMPT = "Explain what an operating system is."
 _NUM_PREDICT = 32
+_DAEMON_START_TIMEOUT = 15.0
 
 
 def ollama_daemon_reachable() -> bool:
@@ -20,6 +24,48 @@ def ollama_daemon_reachable() -> bool:
         return True
     except requests.RequestException:
         return False
+
+
+def start_ollama_daemon(timeout: float = _DAEMON_START_TIMEOUT) -> subprocess.Popen | None:
+    """Launch `ollama serve` in the background and wait until it answers.
+
+    Returns the Popen handle (pass it to ``stop_ollama_daemon`` afterwards),
+    or None if the binary is missing, failed to start, or never became
+    reachable within ``timeout`` seconds.
+    """
+    if shutil.which("ollama") is None:
+        return None
+    try:
+        proc = subprocess.Popen(
+            ["ollama", "serve"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except OSError:
+        return None
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if ollama_daemon_reachable():
+            return proc
+        if proc.poll() is not None:
+            return None
+        time.sleep(0.3)
+    stop_ollama_daemon(proc)
+    return None
+
+
+def stop_ollama_daemon(proc: subprocess.Popen) -> None:
+    """Stop a daemon previously started by ``start_ollama_daemon``."""
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
 
 
 def benchmark_ollama(tag: str, options: dict | None = None) -> float | None:
