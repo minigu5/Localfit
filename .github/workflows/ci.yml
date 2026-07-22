@@ -29,6 +29,19 @@ jobs:
       - name: Verify CLI entry point
         run: omm --help
 
+  bare-install:
+    name: Verify CLI with only declared runtime dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+      - name: Install omm with no dev/server extras (mirrors a real pipx/curl install)
+        run: python -m pip install -e .
+      - name: Verify CLI entry point imports and runs cleanly
+        run: omm --help
+
   docker:
     name: Reproducible Linux container
     runs-on: ubuntu-latest
