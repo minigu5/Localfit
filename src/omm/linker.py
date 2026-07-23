@@ -145,6 +145,18 @@ def link_ollama(gguf_path: Path, model_name: str) -> bool:
     architecture = gguf_meta.get("general.architecture", "unknown")
     has_chat_template = "tokenizer.chat_template" in gguf_meta
 
+    if architecture == "clip":
+        # A CLIP-architecture GGUF is a multimodal projector (mmproj), not a
+        # standalone text-generation model - it has no tokenizer/vocabulary
+        # of its own and must be paired with its base model. Ollama's
+        # llama-server crashes with "unsupported model architecture: 'clip'"
+        # if asked to run it alone, so refuse the link instead of producing
+        # a manifest that looks installed but can never generate text.
+        raise LinkError(
+            "This GGUF is a multimodal projector (mmproj), not a standalone "
+            "model - it can't run alone in Ollama, so omm won't link it there."
+        )
+
     blobs_dir = ollama_models_dir() / "blobs"
     blobs_dir.mkdir(parents=True, exist_ok=True)
 

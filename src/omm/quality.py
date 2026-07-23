@@ -178,6 +178,17 @@ def _model_metadata(tag: str) -> dict:
     listed = next((item for item in tags if isinstance(item, dict) and _tag_matches(item.get("name"), tag)), None)
     if listed is None:
         raise QualityEvaluationError(f"Ollama model '{tag}' is not installed")
+    listed_details = listed.get("details")
+    if isinstance(listed_details, dict) and listed_details.get("family") == "clip":
+        # A linked-but-broken mmproj (multimodal projector) model: it was
+        # registered before omm refused to link these, or via a manual
+        # `ollama create`. It has no tokenizer of its own, so /api/generate
+        # would crash Ollama's llama-server rather than return quality/speed
+        # results - fail fast with a clear reason instead of an opaque 500.
+        raise QualityEvaluationError(
+            f"Ollama model '{tag}' is a multimodal projector (mmproj), not a "
+            "standalone text-generation model - it can't be benchmarked."
+        )
     shown = _request_json("POST", "/api/show", {"model": tag}, timeout=30)
     details = shown.get("details") if isinstance(shown.get("details"), dict) else {}
     model_info = shown.get("model_info") if isinstance(shown.get("model_info"), dict) else {}

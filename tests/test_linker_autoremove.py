@@ -1,6 +1,25 @@
 import json
 
+import pytest
+
 from omm import linker
+
+
+def test_link_ollama_refuses_clip_mmproj_gguf(tmp_path, monkeypatch):
+    """mmproj GGUFs (general.architecture == 'clip') are vision projectors,
+    not standalone text-generation models. Ollama's llama-server crashes with
+    'unsupported model architecture: clip' if asked to run one alone, so omm
+    must refuse the link rather than create a manifest for a model that can
+    never generate text."""
+    gguf_path = tmp_path / "mmproj.gguf"
+    gguf_path.write_bytes(b"not a real gguf, metadata is mocked below")
+    monkeypatch.setattr(linker, "read_gguf_metadata", lambda path, keys: {"general.architecture": "clip"})
+    monkeypatch.setattr(linker, "ollama_models_dir", lambda: tmp_path / "ollama")
+
+    with pytest.raises(linker.LinkError, match="multimodal projector"):
+        linker.link_ollama(gguf_path, "mmproj")
+
+    assert not (tmp_path / "ollama").exists()
 
 
 def test_autoremove_lmstudio_deletes_broken_symlink_and_prunes_empty_dirs(tmp_path, monkeypatch):

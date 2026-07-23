@@ -207,6 +207,31 @@ def test_model_metadata_matches_bare_tag_against_implicit_latest_suffix(monkeypa
     assert metadata["digest"] == "sha256:" + "a" * 64
 
 
+def test_model_metadata_rejects_already_linked_clip_mmproj(monkeypatch):
+    """A model linked before omm refused clip/mmproj links (or linked
+    manually via `ollama create`) must fail fast with a clear reason instead
+    of reaching /api/generate, where Ollama's llama-server crashes with
+    "unsupported model architecture: 'clip'" and surfaces as an opaque 500."""
+
+    def fake_request(method, path, payload=None, timeout=10):
+        assert path == "/api/tags"
+        return {
+            "models": [
+                {
+                    "name": "mmproj:latest",
+                    "digest": "sha256:" + "a" * 64,
+                    "size": 100,
+                    "details": {"family": "clip"},
+                }
+            ]
+        }
+
+    monkeypatch.setattr(quality, "_request_json", fake_request)
+
+    with pytest.raises(quality.QualityEvaluationError, match="multimodal projector"):
+        quality._model_metadata("mmproj")
+
+
 def test_multi_sample_benchmark_reuses_identical_options(monkeypatch):
     calls = []
     monkeypatch.setattr(
