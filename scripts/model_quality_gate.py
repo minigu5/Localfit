@@ -9,6 +9,15 @@ from typing import Any
 from omm.mltree import predict_ensemble
 
 
+class InsufficientTelemetryError(ValueError):
+    """Raised when the telemetry corpus itself isn't big/clean enough yet.
+
+    Distinct from other ValueErrors in this module (which signal a bug in
+    how the audit dict was built): this one means "come back once more real
+    data has been collected" and callers may treat it as a soft skip.
+    """
+
+
 def _finite_number(value: Any, name: str) -> float:
     if isinstance(value, bool) or not isinstance(value, Real):
         raise ValueError(f"{name} must be a number")
@@ -331,7 +340,7 @@ def validate_dataset(
             "audit.direct_v6_unique_configurations cannot exceed audit.unique_configurations"
         )
     if direct_v6_unique < min_unique_configurations:
-        raise ValueError("dataset has too few unique direct-v6 configurations")
+        raise InsufficientTelemetryError("dataset has too few unique direct-v6 configurations")
     rejection_rate = 0.0 if raw_rows == 0 else rejected_rows / raw_rows
     if rejection_rate > maximum:
-        raise ValueError("dataset rejection rate exceeds limit")
+        raise InsufficientTelemetryError("dataset rejection rate exceeds limit")

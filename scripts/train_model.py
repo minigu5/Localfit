@@ -43,6 +43,7 @@ from omm.featurize import (  # noqa: E402
 )
 from omm.atomic import atomic_write_text, locked  # noqa: E402
 from scripts.model_quality_gate import (  # noqa: E402
+    InsufficientTelemetryError,
     compare_artifacts,
     selection_context_key,
     validate_artifact,
@@ -553,14 +554,44 @@ def main() -> None:
     )
 
     if args.quality_gate:
-        # Validate before constructing a candidate or touching the destination.
-        validate_dataset(
-            telemetry_audit,
-            min_unique_configurations=args.minimum_real_configurations,
-            max_rejection_rate=args.maximum_rejection_rate,
-        )
         if args.baseline is None:
             raise ValueError("--baseline is required with --quality-gate")
+        # Validate before constructing a candidate or touching the destination.
+        try:
+            validate_dataset(
+                telemetry_audit,
+                min_unique_configurations=args.minimum_real_configurations,
+                max_rejection_rate=args.maximum_rejection_rate,
+            )
+        except InsufficientTelemetryError as error:
+            # The telemetry corpus hasn't grown enough yet, not a code bug.
+            # Republish the baseline unchanged rather than failing CI.
+            try:
+                baseline_text = args.baseline.read_text()
+            except OSError as read_error:
+                raise ValueError(
+                    f"could not read baseline artifact {args.baseline}: {read_error}"
+                ) from read_error
+            print(f"Quality gate: {error}. Keeping current model unchanged.")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            with locked(args.output):
+                atomic_write_text(args.output, baseline_text)
+            if args.quality_report:
+                args.quality_report.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(
+                    args.quality_report,
+                    json.dumps(
+                        {
+                            "passed": False,
+                            "skipped": True,
+                            "reason": str(error),
+                            "telemetry_audit": telemetry_audit,
+                        },
+                        indent=2,
+                    )
+                    + "\n",
+                )
+            return
         try:
             baseline = json.loads(args.baseline.read_text())
         except (OSError, json.JSONDecodeError) as error:

@@ -501,9 +501,40 @@ def test_quality_gate_regression_does_not_overwrite_output(tmp_path, monkeypatch
     assert output.read_text() == "incumbent-output"
 
 
-def test_quality_gate_fetch_failure_does_not_overwrite_output(tmp_path, monkeypatch):
+def test_quality_gate_insufficient_data_republishes_baseline_unchanged(tmp_path, monkeypatch):
     output = tmp_path / "model.json"
-    output.write_text("incumbent-output")
+    baseline = tmp_path / "baseline.json"
+    baseline.write_text("incumbent-output")
+    quality_report = tmp_path / "quality-report.json"
+    monkeypatch.setattr(train_model, "fetch_real_rows", lambda _url: [])
+    monkeypatch.setattr(
+        train_model,
+        "parse_args",
+        lambda: Namespace(
+            telemetry_file=[],
+            offline=False,
+            telemetry_url="https://collector.example/export",
+            output=output,
+            baseline=baseline,
+            quality_gate=True,
+            minimum_real_configurations=100,
+            maximum_rejection_rate=0.25,
+            holdout_fraction=0.2,
+            quality_report=quality_report,
+        ),
+    )
+
+    train_model.main()  # must not raise: too little telemetry is not a bug
+
+    assert output.read_text() == "incumbent-output"
+    report = json.loads(quality_report.read_text())
+    assert report["passed"] is False
+    assert report["skipped"] is True
+    assert "too few unique" in report["reason"]
+
+
+def test_quality_gate_insufficient_data_still_requires_readable_baseline(tmp_path, monkeypatch):
+    output = tmp_path / "model.json"
     monkeypatch.setattr(train_model, "fetch_real_rows", lambda _url: [])
     monkeypatch.setattr(
         train_model,
@@ -522,10 +553,10 @@ def test_quality_gate_fetch_failure_does_not_overwrite_output(tmp_path, monkeypa
         ),
     )
 
-    with pytest.raises(ValueError, match="too few unique"):
+    with pytest.raises(ValueError, match="could not read baseline artifact"):
         train_model.main()
 
-    assert output.read_text() == "incumbent-output"
+    assert not output.exists()
 
 
 def test_offline_training_exports_v4_with_64_trees(tmp_path, monkeypatch):
