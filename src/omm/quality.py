@@ -160,11 +160,22 @@ def ollama_version() -> str | None:
     return value if isinstance(value, str) and len(value) <= 64 else None
 
 
+def _tag_matches(name: object, tag: str) -> bool:
+    """Ollama's /api/tags always suffixes a tag (default 'latest'), while omm
+    passes around bare tags. Treat 'mmproj' and 'mmproj:latest' as the same
+    model instead of failing the lookup on an implicit-suffix mismatch."""
+    if not isinstance(name, str):
+        return False
+    if name == tag:
+        return True
+    return ":" not in tag and name == f"{tag}:latest"
+
+
 def _model_metadata(tag: str) -> dict:
     tags = _request_json("GET", "/api/tags", timeout=10).get("models")
     if not isinstance(tags, list):
         raise QualityEvaluationError("Ollama model list is missing")
-    listed = next((item for item in tags if isinstance(item, dict) and item.get("name") == tag), None)
+    listed = next((item for item in tags if isinstance(item, dict) and _tag_matches(item.get("name"), tag)), None)
     if listed is None:
         raise QualityEvaluationError(f"Ollama model '{tag}' is not installed")
     shown = _request_json("POST", "/api/show", {"model": tag}, timeout=30)
@@ -223,7 +234,7 @@ def runtime_snapshot(tag: str, digest: str | None, options: dict) -> dict | None
             (
                 item
                 for item in models
-                if isinstance(item, dict) and item.get("name") == tag
+                if isinstance(item, dict) and _tag_matches(item.get("name"), tag)
             ),
             None,
         )

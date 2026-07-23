@@ -183,6 +183,30 @@ def test_runtime_snapshot_prefers_digest_and_reports_actual_offload(monkeypatch)
     }
 
 
+def test_model_metadata_matches_bare_tag_against_implicit_latest_suffix(monkeypatch):
+    """Ollama's /api/tags always names entries with a suffix ('mmproj:latest'),
+    even when the caller passes the bare tag omm hands around internally
+    ('mmproj'). A strict-equality lookup used to report a linked, installed
+    model as "not installed"."""
+
+    def fake_request(method, path, payload=None, timeout=10):
+        if path == "/api/tags":
+            return {
+                "models": [
+                    {"name": "mmproj:latest", "digest": "sha256:" + "a" * 64, "size": 100}
+                ]
+            }
+        assert path == "/api/show"
+        return {"details": {}, "model_info": {}, "capabilities": []}
+
+    monkeypatch.setattr(quality, "_request_json", fake_request)
+
+    metadata = quality._model_metadata("mmproj")
+
+    assert metadata["tag"] == "mmproj"
+    assert metadata["digest"] == "sha256:" + "a" * 64
+
+
 def test_multi_sample_benchmark_reuses_identical_options(monkeypatch):
     calls = []
     monkeypatch.setattr(
