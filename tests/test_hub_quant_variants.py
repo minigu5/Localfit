@@ -1,7 +1,7 @@
 import pytest
 
 from omm import hub
-from omm.hub import AmbiguousModelError, resolve_model
+from omm.hub import AmbiguousModelError, ModelResolutionError, resolve_model
 
 
 class _FakeResponse:
@@ -77,6 +77,64 @@ def test_rank_quant_variants_falls_back_to_repo_level_param_count():
 
     assert ranked[0].fits is False
     assert ranked[0].required_gb == pytest.approx(8.19 * 8 / 8 * 1.2)
+
+
+def test_resolve_model_skips_mmproj_when_repo_has_single_real_model(monkeypatch):
+    # Regression: a repo whose sole *non-mmproj* .gguf is the real model, but
+    # which also ships an mmproj file, must not let the mmproj file win the
+    # "only one candidate" auto-select shortcut just because it's listed too.
+    monkeypatch.setattr(
+        hub.requests,
+        "get",
+        lambda url, timeout: _FakeResponse(
+            [
+                {"rfilename": "llava-v1.6-mistral-7b.Q4_K_M.gguf"},
+                {"rfilename": "mmproj-model-f16.gguf"},
+            ]
+        ),
+    )
+
+    resolved = resolve_model("liuhaotian/llava-v1.6-mistral-7b-GGUF")
+
+    assert resolved.filename == "llava-v1.6-mistral-7b.Q4_K_M.gguf"
+
+
+def test_resolve_model_raises_when_repo_only_has_mmproj_files(monkeypatch):
+    # Regression: a repo (or mirror) that only publishes the mmproj file
+    # must not be silently installed as if it were a standalone model.
+    monkeypatch.setattr(
+        hub.requests,
+        "get",
+        lambda url, timeout: _FakeResponse([{"rfilename": "mmproj-model-f16.gguf"}]),
+    )
+
+    with pytest.raises(ModelResolutionError, match="multimodal projector"):
+        resolve_model("some-org/mmproj-only-repo")
+
+
+def test_resolve_model_excludes_mmproj_from_ambiguous_candidates(monkeypatch):
+    # Regression: when multiple real quants exist alongside an mmproj file,
+    # the mmproj file must not appear in the quant picker at all - it isn't
+    # a quant of the model.
+    monkeypatch.setattr(
+        hub.requests,
+        "get",
+        lambda url, timeout: _FakeResponse(
+            [
+                {"rfilename": "llava-v1.6-mistral-7b.Q4_K_M.gguf"},
+                {"rfilename": "llava-v1.6-mistral-7b.Q8_0.gguf"},
+                {"rfilename": "mmproj-model-f16.gguf"},
+            ]
+        ),
+    )
+
+    with pytest.raises(AmbiguousModelError) as exc_info:
+        resolve_model("liuhaotian/llava-v1.6-mistral-7b-GGUF")
+
+    assert exc_info.value.candidates == [
+        "llava-v1.6-mistral-7b.Q4_K_M.gguf",
+        "llava-v1.6-mistral-7b.Q8_0.gguf",
+    ]
 
 
 def test_resolve_model_ambiguous_error_carries_repo_level_param_count(monkeypatch):

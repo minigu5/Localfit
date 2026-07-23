@@ -65,6 +65,17 @@ _CHIP_MODEL_RE = re.compile(
     re.IGNORECASE,
 )
 
+_MMPROJ_RE = re.compile(r"mmproj", re.IGNORECASE)
+
+
+def is_mmproj_filename(filename: str) -> bool:
+    """llama.cpp's conversion tooling always names multimodal-projector
+    GGUFs with "mmproj" in the filename. These aren't standalone models -
+    they have no tokenizer/vocabulary of their own - so callers that
+    auto-pick or rank a repo's .gguf files should exclude them rather than
+    let one outrank or stand in for the real model quants."""
+    return bool(_MMPROJ_RE.search(filename))
+
 
 def parse_param_count_billions(text: str) -> float | None:
     # Strip repository-owner tokens because authors such as ``hauser458b``

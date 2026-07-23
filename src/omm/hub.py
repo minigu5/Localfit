@@ -13,7 +13,7 @@ from urllib.parse import quote
 
 import requests
 
-from omm.featurize import parse_param_count_billions, parse_quant_bits
+from omm.featurize import is_mmproj_filename, parse_param_count_billions, parse_quant_bits
 
 HF_API = "https://huggingface.co/api/models/{repo_id}"
 HF_DOWNLOAD = "https://huggingface.co/{repo_id}/resolve/main/{filename}"
@@ -238,9 +238,19 @@ def resolve_model(model_name: str) -> ResolvedModel:
             candidates, param_count_b = _fetch_repo_gguf_info(repo_id)
             if not candidates:
                 raise ModelResolutionError(f"No .gguf files found in HF repo '{repo_id}'.")
-            if len(candidates) > 1:
-                raise AmbiguousModelError(repo_id, candidates, param_count_b)
-            filename = candidates[0]
+            # mmproj files aren't standalone models - excluded here so a repo
+            # that ships one alongside the real model doesn't get the mmproj
+            # auto-selected (single-candidate shortcut) or offered in the
+            # quant picker (ambiguous case) as if it were a quant choice.
+            model_candidates = [c for c in candidates if not is_mmproj_filename(c)]
+            if not model_candidates:
+                raise ModelResolutionError(
+                    f"HF repo '{repo_id}' only contains a multimodal projector "
+                    "(mmproj) file, not a standalone model GGUF - nothing to install."
+                )
+            if len(model_candidates) > 1:
+                raise AmbiguousModelError(repo_id, model_candidates, param_count_b)
+            filename = model_candidates[0]
         url = HF_DOWNLOAD.format(repo_id=repo_id, filename=filename)
         return ResolvedModel(url=url, filename=filename, repo_id=repo_id)
 
