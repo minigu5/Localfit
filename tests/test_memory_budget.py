@@ -30,6 +30,7 @@ def test_unified_budget_subtracts_live_apps_and_os_reserve_once():
     assert budget.ram_safety_reserve_gb == pytest.approx(2.4)
     assert budget.vram_budget_gb is None
     assert budget.constrained_by_live_usage is True
+    assert budget.install_budget_gb == pytest.approx(19.2)
 
 
 def test_idle_machine_is_still_capped_below_total_memory():
@@ -53,6 +54,7 @@ def test_discrete_gpu_uses_live_free_vram_with_a_reserve():
     assert budget.ram_budget_gb == pytest.approx(2.0)
     assert budget.vram_budget_gb == pytest.approx(5.5)
     assert budget.model_budget_gb == pytest.approx(5.5)
+    assert budget.install_budget_gb == pytest.approx(12.8)
 
 
 def test_low_live_memory_never_becomes_negative():
@@ -61,9 +63,11 @@ def test_low_live_memory_never_becomes_negative():
     assert budget.model_budget_gb == 0
 
 
-def test_model_fit_uses_current_available_memory_not_installed_total():
+def test_model_fit_uses_installed_total_not_current_available_memory():
+    """Install-time fit checks (search/install/recommend) shouldn't flap
+    based on what else happens to be running on the machine right now."""
     hardware = _hardware(ram_available_gb=5, vram_free_gb=5)
     candidate = {"name": "model-7B-Q4", "size_bytes": 4 * 1024**3}
 
-    assert predictor.available_model_memory_gb(hardware) == pytest.approx(2.6)
-    assert predictor.candidate_fits_memory(hardware, candidate) is False
+    assert predictor.available_model_memory_gb(hardware) == pytest.approx(19.2)
+    assert predictor.candidate_fits_memory(hardware, candidate) is True

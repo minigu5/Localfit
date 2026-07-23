@@ -43,6 +43,10 @@ class MemoryBudget:
     ram_safety_reserve_gb: float
     vram_safety_reserve_gb: float | None
     constrained_by_live_usage: bool
+    install_budget_gb: float
+    """Total-RAM-based cap, ignoring current free memory. Use this for
+    install/search/recommend decisions, which pick a model to keep long
+    term and shouldn't be swayed by other apps' memory use at scan time."""
 
 
 def calculate_memory_budget(hw: HardwareInfo) -> MemoryBudget:
@@ -69,6 +73,7 @@ def calculate_memory_budget(hw: HardwareInfo) -> MemoryBudget:
             ram_safety_reserve_gb=ram_reserve,
             vram_safety_reserve_gb=None,
             constrained_by_live_usage=ram_constrained,
+            install_budget_gb=ram_total_cap,
         )
 
     vram_total = hw.vram_total_gb
@@ -91,6 +96,7 @@ def calculate_memory_budget(hw: HardwareInfo) -> MemoryBudget:
         constrained_by_live_usage=(
             ram_constrained or vram_live_cap < vram_total_cap
         ),
+        install_budget_gb=max(ram_total_cap, vram_total_cap),
     )
 
 

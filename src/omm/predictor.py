@@ -79,8 +79,8 @@ def validate_model_artifact(artifact: object) -> dict:
 
 
 def available_model_memory_gb(hw: HardwareInfo) -> float:
-    """Live model budget after current application use and safety reserves."""
-    return calculate_memory_budget(hw).model_budget_gb
+    """Total-RAM-based install budget, unaffected by current free memory."""
+    return calculate_memory_budget(hw).install_budget_gb
 
 
 def estimate_required_memory_gb(candidate: dict) -> float | None:

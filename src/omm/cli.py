@@ -807,7 +807,7 @@ def recommend() -> None:
             pass
 
     has_gpu = info.vram_total_gb is not None
-    available_gb = calculate_memory_budget(info).model_budget_gb
+    available_gb = calculate_memory_budget(info).install_budget_gb
 
     rule_list = rules_mod.load_rules()
     matches = rules_mod.matching_rules(rule_list, available_gb, has_gpu=has_gpu)
@@ -964,7 +964,7 @@ def _pick_quant_variant(error: AmbiguousModelError) -> str | None:
     highlighted in green, per the cached ML speed model (skipped entirely if
     no model is cached)."""
     info = scan_hardware()
-    available_gb = calculate_memory_budget(info).model_budget_gb
+    available_gb = calculate_memory_budget(info).install_budget_gb
 
     variants = rank_quant_variants(error.candidates, available_gb, error.param_count_b)
     resolved_variants = []
