@@ -501,3 +501,441 @@ def test_failure_entry_never_leaks_raw_exception_text_paths_or_ips(monkeypatch):
     assert set(entry.keys()) <= {
         "tag", "outcome", "failure_reason", "measurement_isolation", "model_metadata", "attempted_runtime",
     }
+
+
+# --- performance_unfit confirmation flow (--confirm-performance-timeout) --
+#
+# These tests mock at the _evaluate_tag_once boundary (one full attempt),
+# not evaluate_model directly - _evaluate_tag_once already has its own
+# internal "retry once without runtime_options" fallback (tested elsewhere)
+# that is orthogonal to the confirmation orchestration under test here.
+
+
+def _ok_metadata(tag):
+    return {
+        "tag": tag, "digest": "abc123", "size_bytes": 1_000_000,
+        "parameter_size": "7B", "quantization_level": "Q4_0",
+    }
+
+
+def _timeout_entry(tag="big:latest"):
+    return {"tag": tag, "outcome": "transient_error", "failure_reason": "generation_timeout"}
+
+
+def _oom_entry(tag="big:latest"):
+    return {"tag": tag, "outcome": "model_unfit", "failure_reason": "out_of_memory"}
+
+
+def _success_entry(tag="big:latest", tokens_per_sec=12.3):
+    return {"tag": tag, "outcome": "success", "speed": {"median_tokens_per_sec": tokens_per_sec}}
+
+
+def _patch_confirmation_plumbing(monkeypatch, *, ollama_version="0.32.1", unload_confirmed=True):
+    """Common non-behavioral mocks for confirmation-flow tests: a healthy
+    daemon, an always-available model, an unload that's confirmed by
+    default, and a no-op sleep (used only inside ensure_model_unloaded's
+    own polling, never as a substitute for that confirmation). Tests
+    control the interesting part (each attempt's outcome) themselves via a
+    fake `_evaluate_tag_once`."""
+    monkeypatch.setattr(quality, "ollama_version", lambda: ollama_version)
+    monkeypatch.setattr(quality, "_model_metadata", _ok_metadata)
+    monkeypatch.setattr(quality, "ensure_model_unloaded", lambda tag, **k: unload_confirmed)
+    monkeypatch.setattr(quality.time, "sleep", lambda seconds: None)
+
+
+def test_default_mode_single_timeout_is_transient_error_never_confirmed(monkeypatch):
+    """1. Default benchmark behavior is unchanged: one timeout is one
+    transient_error, with no retry and no confirmation_attempts field."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware())  # confirm_performance_timeout omitted
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["failure_reason"] == "generation_timeout"
+    assert calls["n"] == 1
+    assert "confirmation_attempts" not in entry
+    assert "timeout_seconds" not in entry
+
+
+def test_confirm_mode_second_attempt_succeeds_reports_real_success(monkeypatch):
+    """2. Confirmation mode, first timeout then a real success: outcome is
+    success with a genuine measurement, never a fabricated speed."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag) if calls["n"] == 1 else _success_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "success"
+    assert entry["speed"]["median_tokens_per_sec"] == 12.3
+    assert calls["n"] == 2
+    assert "confirmation_attempts" not in entry
+
+
+def test_confirm_mode_two_confirmed_timeouts_is_performance_unfit(monkeypatch):
+    """3 & 9. Two generation_timeouts in a row under a healthy daemon become
+    performance_unfit/confirmed_generation_timeout, with confirmation_attempts=2,
+    a real timeout_seconds, and no fabricated or leftover speed fields."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "performance_unfit"
+    assert entry["failure_reason"] == "confirmed_generation_timeout"
+    assert entry["confirmation_attempts"] == 2
+    assert entry["timeout_seconds"] == quality.DEFAULT_GENERATION_TIMEOUT_SECONDS
+    assert calls["n"] == 2
+    for forbidden in ("tokens_per_sec", "tokens_per_sec_min", "tokens_per_sec_max", "sample_count"):
+        assert forbidden not in entry
+
+
+@pytest.mark.parametrize("attempt_of_failure", [1, 2])
+def test_confirm_mode_explicit_oom_is_model_unfit(monkeypatch, attempt_of_failure):
+    """4. An explicit OOM on either the first or the confirmation attempt is
+    model_unfit - OOM is decisive and is never itself retried a third time."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        if calls["n"] == 1 and attempt_of_failure == 2:
+            return _timeout_entry(tag)
+        return _oom_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "model_unfit"
+    assert entry["failure_reason"] == "out_of_memory"
+    assert calls["n"] == attempt_of_failure
+    assert "confirmation_attempts" not in entry
+
+
+def test_confirm_mode_daemon_down_before_confirmation_is_transient_error(monkeypatch):
+    """5. If the daemon health check fails before the confirmation attempt
+    even starts, the result is transient_error, not performance_unfit -
+    a dead daemon proves nothing about the model's own performance."""
+    _patch_confirmation_plumbing(monkeypatch, ollama_version=None)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["failure_reason"] == "ollama_unavailable"
+    assert calls["n"] == 1  # the confirmation attempt itself never ran
+
+
+def test_confirm_mode_model_gone_before_confirmation_is_transient_error(monkeypatch):
+    """5 (variant) & 15. If the model itself is no longer available at
+    confirmation time, that's transient_error, not performance_unfit - and
+    a secret-laden exception message from that check never reaches the
+    final event (_build_failure_entry only keeps the structured reason)."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+    secret_message = "C:\\Users\\alice\\secret - model gone, connection refused by 10.0.0.5"
+
+    def missing_metadata(tag):
+        raise quality.QualityEvaluationError(secret_message, failure_reason=quality.FAILURE_REASON_MODEL_LOAD_FAILED)
+
+    monkeypatch.setattr(quality, "_model_metadata", missing_metadata)
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["failure_reason"] == "model_load_failed"
+    assert calls["n"] == 1
+    serialized = json.dumps(report)
+    assert secret_message not in serialized
+    assert "alice" not in serialized
+    assert "10.0.0.5" not in serialized
+
+
+def test_confirm_mode_second_attempt_waits_for_confirmed_unload_not_a_fixed_sleep(monkeypatch):
+    """6 & 7. A requests.ReadTimeout only ends the client's own wait - it is
+    not proof Ollama's generation goroutine actually stopped. The second
+    attempt must not run until ensure_model_unloaded has *confirmed* the
+    model is gone (via /api/ps), not merely after some fixed delay."""
+    _patch_confirmation_plumbing(monkeypatch)
+    events: list = []
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        events.append("attempt")
+        return _timeout_entry(tag) if events.count("attempt") == 1 else _success_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+    monkeypatch.setattr(
+        quality, "ensure_model_unloaded", lambda tag, **k: events.append("unload_confirmed") or True
+    )
+
+    quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    assert events == ["attempt", "unload_confirmed", "attempt"]
+
+
+def test_confirm_mode_second_attempt_not_issued_before_unload_is_confirmed(monkeypatch):
+    """1. The second (confirmation) request is never called until
+    ensure_model_unloaded has returned - proving the two generation
+    requests never overlap inside the daemon."""
+    _patch_confirmation_plumbing(monkeypatch)
+    order: list = []
+
+    def fake_ensure_unloaded(tag, **k):
+        order.append("ensure_model_unloaded_start")
+        order.append("ensure_model_unloaded_done")
+        return True
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        order.append("attempt")
+        return _timeout_entry(tag) if order.count("attempt") == 1 else _success_entry(tag)
+
+    monkeypatch.setattr(quality, "ensure_model_unloaded", fake_ensure_unloaded)
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    # The unload confirmation fully completes between the two attempts -
+    # never interleaved with, or skipped before, the second attempt.
+    assert order == [
+        "attempt", "ensure_model_unloaded_start", "ensure_model_unloaded_done", "attempt",
+    ]
+
+
+def test_confirm_mode_unload_not_confirmed_is_transient_error_and_skips_second_attempt(monkeypatch):
+    """1, 5 & 9. If the model can't be confirmed unloaded within the bounded
+    wait, the second request is never issued, the result is
+    transient_error (never model_unfit/performance_unfit - unload failure
+    says nothing about the model itself), and exactly one attempt ran."""
+    _patch_confirmation_plumbing(monkeypatch, unload_confirmed=False)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["outcome"] not in ("model_unfit", "performance_unfit")
+    assert calls["n"] == 1  # the confirmation attempt itself never ran
+    assert "confirmation_attempts" not in entry
+
+
+def test_ensure_model_unloaded_is_called_with_the_correct_tag_before_confirmation(monkeypatch):
+    _patch_confirmation_plumbing(monkeypatch)
+    seen = {}
+
+    def fake_ensure_unloaded(tag, **k):
+        seen["tag"] = tag
+        return True
+
+    monkeypatch.setattr(quality, "ensure_model_unloaded", fake_ensure_unloaded)
+    monkeypatch.setattr(quality, "_evaluate_tag_once", lambda tag, hardware, pack, speed_runs: _timeout_entry(tag))
+
+    quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    assert seen["tag"] == "big:latest"
+
+
+@pytest.mark.parametrize(
+    "second_outcome_fn",
+    [_success_entry, _oom_entry, _timeout_entry],
+    ids=["success", "model_unfit", "performance_unfit"],
+)
+def test_confirm_mode_cleans_up_after_the_confirmation_attempt_regardless_of_outcome(
+    monkeypatch, second_outcome_fn
+):
+    """8 & cleanup tests. After the confirmation attempt finishes, the model
+    is unloaded again as best-effort final cleanup - for every possible
+    verdict, not just performance_unfit."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+    unload_calls = []
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag) if calls["n"] == 1 else second_outcome_fn(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: unload_calls.append(tag) or True)
+
+    quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    assert unload_calls == ["big:latest"]
+
+
+def test_confirm_mode_final_cleanup_failure_does_not_change_the_verdict(monkeypatch):
+    """Cleanup failure must never flip or corrupt an already-decided
+    outcome - unload_model already swallows its own errors and returns a
+    bool, so a False here must be silently ignored."""
+    _patch_confirmation_plumbing(monkeypatch)
+    calls = {"n": 0}
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        calls["n"] += 1
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: False)  # final cleanup "fails"
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "performance_unfit"
+    assert entry["failure_reason"] == "confirmed_generation_timeout"
+    assert entry["confirmation_attempts"] == 2
+
+
+# --- ensure_model_unloaded / _model_is_loaded: bounded polling, not a sleep
+
+
+def test_ensure_model_unloaded_confirms_immediately_without_sleeping(monkeypatch):
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+    polls = {"n": 0}
+
+    def fake_is_loaded(tag):
+        polls["n"] += 1
+        return False
+
+    monkeypatch.setattr(quality, "_model_is_loaded", fake_is_loaded)
+    slept = []
+    monkeypatch.setattr(quality.time, "sleep", lambda seconds: slept.append(seconds))
+
+    assert quality.ensure_model_unloaded("big:latest") is True
+    assert polls["n"] == 1
+    assert slept == []
+
+
+def test_ensure_model_unloaded_polls_until_confirmed_gone(monkeypatch):
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+    remaining = [True, True, False]
+    monkeypatch.setattr(quality, "_model_is_loaded", lambda tag: remaining.pop(0))
+    slept = []
+    monkeypatch.setattr(quality.time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = quality.ensure_model_unloaded("big:latest", max_wait_seconds=10, poll_interval_seconds=1)
+
+    assert result is True
+    assert slept == [1, 1]
+
+
+def test_ensure_model_unloaded_never_polls_indefinitely(monkeypatch):
+    """4. Bounded polling: gives up at max_wait_seconds rather than looping
+    forever when the model stays (or appears to stay) loaded."""
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+    monkeypatch.setattr(quality, "_model_is_loaded", lambda tag: True)  # never confirms
+    slept = []
+    monkeypatch.setattr(quality.time, "sleep", lambda seconds: slept.append(seconds))
+
+    result = quality.ensure_model_unloaded("big:latest", max_wait_seconds=3, poll_interval_seconds=1)
+
+    assert result is False
+    assert slept == [1, 1, 1]  # exactly bounded, not unbounded
+
+
+def test_ensure_model_unloaded_treats_unreachable_daemon_as_not_confirmed(monkeypatch):
+    """An /api/ps that can't even be queried is never treated as proof the
+    model is gone - that would defeat the whole point of confirming."""
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+    monkeypatch.setattr(quality, "_model_is_loaded", lambda tag: None)
+    monkeypatch.setattr(quality.time, "sleep", lambda seconds: None)
+
+    assert quality.ensure_model_unloaded("big:latest", max_wait_seconds=2, poll_interval_seconds=1) is False
+
+
+def test_ensure_model_unloaded_calls_ollamas_own_stop_api_not_a_process_kill(monkeypatch):
+    calls = []
+    monkeypatch.setattr(quality, "unload_model", lambda tag: calls.append(tag) or True)
+    monkeypatch.setattr(quality, "_model_is_loaded", lambda tag: False)
+
+    quality.ensure_model_unloaded("big:latest")
+
+    assert calls == ["big:latest"]  # only Ollama's own keep_alive=0 endpoint, never a subprocess signal
+
+
+def test_model_is_loaded_true_when_tag_present_in_api_ps(monkeypatch):
+    monkeypatch.setattr(
+        quality, "_request_json",
+        lambda method, path, payload=None, timeout=10: {"models": [{"name": "big:latest"}]},
+    )
+    assert quality._model_is_loaded("big:latest") is True
+    assert quality._model_is_loaded("other:latest") is False
+
+
+def test_model_is_loaded_returns_none_when_daemon_unreachable(monkeypatch):
+    def raising(method, path, payload=None, timeout=10):
+        raise quality.QualityEvaluationError("down", failure_reason=quality.FAILURE_REASON_OLLAMA_UNAVAILABLE)
+
+    monkeypatch.setattr(quality, "_request_json", raising)
+
+    assert quality._model_is_loaded("big:latest") is None
+
+
+def test_performance_unfit_entry_has_no_stray_or_speed_fields(monkeypatch):
+    """9 & 15. A performance_unfit event carries only the documented v7
+    failure fields plus the two confirmation fields - nothing else leaks
+    in from the underlying attempt dicts."""
+    _patch_confirmation_plumbing(monkeypatch)
+
+    def fake_attempt(tag, hardware, pack, speed_runs):
+        return _timeout_entry(tag)
+
+    monkeypatch.setattr(quality, "_evaluate_tag_once", fake_attempt)
+
+    report = quality.collect_evidence(["big:latest"], _hardware(), confirm_performance_timeout=True)
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "performance_unfit"
+    assert set(entry.keys()) <= {
+        "tag", "outcome", "failure_reason", "measurement_isolation", "model_metadata",
+        "attempted_runtime", "confirmation_attempts", "timeout_seconds",
+    }
+
+
+def test_outcome_for_confirmed_generation_timeout_is_performance_unfit():
+    assert quality.outcome_for_failure_reason(
+        quality.FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT
+    ) == "performance_unfit"
+    assert quality.FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT in quality.PERFORMANCE_UNFIT_REASONS
+    assert quality.FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT not in quality.MODEL_UNFIT_REASONS
+    assert quality.FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT not in quality.TRANSIENT_ERROR_REASONS

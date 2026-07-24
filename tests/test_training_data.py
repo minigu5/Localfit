@@ -898,3 +898,115 @@ def test_report_telemetry_v7_success_event_feeds_speed_regression_and_positive_f
     assert fit_y == [True]
     assert fit_audit["positive_examples"] == 1
     assert fit_audit["negative_examples"] == 0
+
+
+# --- v7: performance_unfit (confirmed_generation_timeout) -----------------
+
+
+def _v7_performance_unfit_row(**overrides) -> dict:
+    row = {
+        "engine": "ollama",
+        "benchmark_version": 7,
+        "outcome": "performance_unfit",
+        "failure_reason": "confirmed_generation_timeout",
+        "confirmation_attempts": 2,
+        "timeout_seconds": 180,
+        "ram_gb": 31.3,
+        "vram_gb": 6.0,
+        "unified_memory": False,
+        "model_installed": "qwen2.5-32b-q8.gguf",
+        "parameter_count_b": 32.8,
+        "active_parameter_count_b": 32.0,
+        "quant_bits": 8.0,
+        "engine_version": "1.0",
+        "client_version": "1.0",
+        "runtime_profile": "explicit_ollama_options",
+        "context_length": 4096,
+        "gpu_offload_percent": 12,
+        "cpu_threads": 8,
+        "num_batch": 256,
+        "cpu_model": "Intel Core i7-9700",
+        "cpu_arch": "x86_64",
+        "cpu_physical_cores": 8,
+        "cpu_logical_cores": 8,
+    }
+    row.update(overrides)
+    return row
+
+
+def test_v7_performance_unfit_is_excluded_from_speed_regression_without_faking_zero():
+    """13. Never coerced into a fake tokens_per_sec=0 regression row."""
+    X, y, audit = train_model.real_rows_to_training_data_with_audit([_v7_performance_unfit_row()])
+
+    assert X == [] and y == []
+    assert audit["rejections"] == {"performance_unfit_excluded_from_regression": 1}
+    assert audit["direct_v6_unique_configurations"] == 0
+    assert audit["direct_v7_unique_configurations"] == 0
+
+
+def test_speed_regression_unique_configurations_unaffected_by_performance_unfit():
+    _X, _y, audit_before = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20)]
+    )
+    _X2, _y2, audit_after = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20), _v7_performance_unfit_row()]
+    )
+
+    assert audit_after["direct_unique_configurations"] == audit_before["direct_unique_configurations"]
+    assert audit_after["unique_configurations"] == audit_before["unique_configurations"]
+
+
+def test_real_rows_to_fit_training_data_performance_unfit_is_a_negative_example():
+    """12. performance_unfit contributes a negative (fit=False) example,
+    exactly like model_unfit, built without any speed fields."""
+    row = _v7_performance_unfit_row()
+    assert "tokens_per_sec" not in row
+    assert "sample_count" not in row
+
+    fit_X, fit_y, audit = train_model.real_rows_to_fit_training_data_with_audit([row])
+
+    assert fit_y == [False]
+    assert audit["positive_examples"] == 0
+    assert audit["negative_examples"] == 1
+    assert audit["rejected_rows"] == 0
+
+
+def test_v7_outcome_contract_across_all_four_outcomes():
+    """Extends test_v7_outcome_contract_across_both_datasets to include
+    performance_unfit: it behaves exactly like model_unfit in both
+    datasets - negative fit label, excluded from speed regression - even
+    though the two failure_reasons mean different things operationally."""
+    success = _v7_success_row(42, model_installed="ok.gguf")
+    unfit = _v7_model_unfit_row(model_installed="oom.gguf")
+    perf_unfit = _v7_performance_unfit_row(model_installed="slow.gguf")
+    transient = _v7_transient_row(model_installed="flaky.gguf")
+    rows = [success, unfit, perf_unfit, transient]
+
+    speed_X, speed_y, speed_audit = train_model.real_rows_to_training_data_with_audit(rows)
+    fit_X, fit_y, fit_audit = train_model.real_rows_to_fit_training_data_with_audit(rows)
+
+    assert speed_y == [42]
+    assert speed_audit["valid_rows"] == 1
+    assert speed_audit["rejections"] == {
+        "model_unfit_excluded_from_regression": 1,
+        "performance_unfit_excluded_from_regression": 1,
+        "transient_error_excluded": 1,
+    }
+
+    assert fit_y.count(True) == 1
+    assert fit_y.count(False) == 2
+    assert len(fit_X) == 3
+    assert fit_audit["positive_examples"] == 1
+    assert fit_audit["negative_examples"] == 2
+    assert fit_audit["rejections"] == {"transient_error_excluded": 1}
+
+
+def test_validate_dataset_excludes_performance_unfit_from_rejection_rate():
+    """14. Same treatment as model_unfit: a healthy stream of confirmed-
+    timeout telemetry must not look like bad data to the rejection gate."""
+    rows = [_v6_row(10)] + [_v7_performance_unfit_row() for _ in range(10)]
+    _X, _y, audit = train_model.real_rows_to_training_data_with_audit(rows)
+
+    assert audit["rejected_rows"] == 10
+    assert audit["raw_rows"] == 11
+    validate_dataset(audit, min_unique_configurations=1, max_rejection_rate=0.25)

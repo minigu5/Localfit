@@ -348,4 +348,137 @@ assert.equal(v7MissingOutcome.ok, false, "v7 accepted an event with no outcome a
 const v7UnknownField = await request("telemetry", "POST", { ...v7Transient, exception_message: "boom" });
 assert.equal(v7UnknownField.ok, false, "v7 accepted an unlisted field (e.g. raw exception text)");
 
+// --- v7: performance_unfit (confirmed_generation_timeout) ------------------
+
+const v7PerformanceUnfit = {
+  ram_gb: 31.3,
+  vram_gb: 6,
+  unified_memory: false,
+  model_installed: "qwen2.5:32b-instruct-q8_0",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "performance_unfit",
+  failure_reason: "confirmed_generation_timeout",
+  confirmation_attempts: 2,
+  timeout_seconds: 180,
+  parameter_count_b: 32.8,
+  active_parameter_count_b: 32,
+  quant_bits: 8,
+  engine_version: "0.32.1",
+  client_version: "0.1.65",
+  cpu_model: "Intel(R) Core(TM) i7-9700 CPU @ 3.00GHz",
+  cpu_arch: "x86_64",
+  cpu_physical_cores: 8,
+  cpu_logical_cores: 8,
+};
+const v7PerformanceUnfitCreated = await request("telemetry", "POST", v7PerformanceUnfit);
+assert.equal(
+  v7PerformanceUnfitCreated.ok, true,
+  `valid v7 performance_unfit event was rejected (${v7PerformanceUnfitCreated.status})`,
+);
+
+const v7PerformanceUnfitMinimal = await request("telemetry", "POST", {
+  ram_gb: 31.3,
+  unified_memory: false,
+  model_installed: "qwen2.5:32b-instruct-q8_0",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "performance_unfit",
+  failure_reason: "confirmed_generation_timeout",
+  confirmation_attempts: 2,
+  timeout_seconds: 180,
+});
+assert.equal(
+  v7PerformanceUnfitMinimal.ok, true,
+  "v7 performance_unfit rejected an event with no model metadata (best-effort fields are optional)",
+);
+
+for (const attempts of [1, 3, "2", true]) {
+  const wrongAttempts = await request("telemetry", "POST", { ...v7PerformanceUnfit, confirmation_attempts: attempts });
+  assert.equal(wrongAttempts.ok, false, `v7 performance_unfit accepted confirmation_attempts=${JSON.stringify(attempts)}`);
+}
+
+const v7PerformanceUnfitMissingAttempts = await request("telemetry", "POST", {
+  ...v7PerformanceUnfit,
+  confirmation_attempts: undefined,
+});
+assert.equal(v7PerformanceUnfitMissingAttempts.ok, false, "v7 performance_unfit accepted a missing confirmation_attempts");
+
+const v7PerformanceUnfitMissingTimeout = await request("telemetry", "POST", {
+  ...v7PerformanceUnfit,
+  timeout_seconds: undefined,
+});
+assert.equal(v7PerformanceUnfitMissingTimeout.ok, false, "v7 performance_unfit accepted a missing timeout_seconds");
+
+for (const timeout of [0, -5, 4000]) {
+  const badTimeout = await request("telemetry", "POST", { ...v7PerformanceUnfit, timeout_seconds: timeout });
+  assert.equal(badTimeout.ok, false, `v7 performance_unfit accepted an out-of-range timeout_seconds=${timeout}`);
+}
+
+const v7PerformanceUnfitWrongLaneReason = await request("telemetry", "POST", {
+  ...v7PerformanceUnfit,
+  failure_reason: "out_of_memory",
+});
+assert.equal(
+  v7PerformanceUnfitWrongLaneReason.ok, false,
+  "v7 performance_unfit accepted a model_unfit-lane failure_reason",
+);
+
+const v7PerformanceUnfitTransientReason = await request("telemetry", "POST", {
+  ...v7PerformanceUnfit,
+  failure_reason: "generation_timeout",
+});
+assert.equal(
+  v7PerformanceUnfitTransientReason.ok, false,
+  "v7 performance_unfit accepted an unconfirmed generation_timeout (only confirmed_generation_timeout is valid here)",
+);
+
+const v7PerformanceUnfitFakeSpeed = await request("telemetry", "POST", {
+  ...v7PerformanceUnfit,
+  tokens_per_sec: 0,
+  tokens_per_sec_min: 0,
+  tokens_per_sec_max: 0,
+  sample_count: 1,
+});
+assert.equal(v7PerformanceUnfitFakeSpeed.ok, false, "v7 performance_unfit accepted a faked zero tokens_per_sec");
+
+const v7ConfirmedTimeoutOnModelUnfit = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  failure_reason: "confirmed_generation_timeout",
+});
+assert.equal(
+  v7ConfirmedTimeoutOnModelUnfit.ok, false,
+  "v7 model_unfit accepted a performance_unfit-lane failure_reason",
+);
+
+const v7ModelUnfitWithConfirmationAttempts = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  confirmation_attempts: 2,
+});
+assert.equal(
+  v7ModelUnfitWithConfirmationAttempts.ok, false,
+  "v7 model_unfit accepted confirmation_attempts - that field belongs to performance_unfit only",
+);
+
+const v7SuccessWithConfirmationAttempts = await request("telemetry", "POST", {
+  ...v7Success,
+  confirmation_attempts: 2,
+  timeout_seconds: 180,
+});
+assert.equal(
+  v7SuccessWithConfirmationAttempts.ok, false,
+  "v7 success accepted confirmation_attempts/timeout_seconds - those fields belong to performance_unfit only",
+);
+
+const v7TransientWithTimeoutSeconds = await request("telemetry", "POST", {
+  ...v7Transient,
+  timeout_seconds: 180,
+});
+assert.equal(
+  v7TransientWithTimeoutSeconds.ok, false,
+  "v7 transient_error accepted timeout_seconds - that field belongs to performance_unfit only",
+);
+
 console.log("Firebase rules scenarios passed.");

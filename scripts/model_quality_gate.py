@@ -364,6 +364,7 @@ def compare_artifacts(
 #: identical to a stream of malformed rows and eventually block training.
 _INTENTIONALLY_EXCLUDED_REASONS = frozenset({
     "model_unfit_excluded_from_regression",
+    "performance_unfit_excluded_from_regression",
     "transient_error_excluded",
 })
 
