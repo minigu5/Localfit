@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import requests
 
 from omm import benchmark, quality
 from omm.hardware import HardwareInfo
@@ -246,3 +247,257 @@ def test_multi_sample_benchmark_reuses_identical_options(monkeypatch):
 
     assert result["count"] == 3
     assert calls == [("model:latest", {"num_ctx": 4096, "num_thread": 8})] * 3
+
+
+# --- v7 structured failure telemetry ---------------------------------------
+
+
+class _FakeResponse:
+    def __init__(self, status_code: int, body=None):
+        self.status_code = status_code
+        self.ok = 200 <= status_code < 300
+        self._body = body
+
+    def json(self):
+        if self._body is None:
+            raise ValueError("no body")
+        return self._body
+
+    @property
+    def text(self):
+        return json.dumps(self._body) if self._body is not None else ""
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        (
+            {"error": "model requires more system memory (10.0 GiB) than is available (8.0 GiB)"},
+            quality.FAILURE_REASON_OUT_OF_MEMORY,
+        ),
+        ({"error": "CUDA out of memory"}, quality.FAILURE_REASON_OUT_OF_MEMORY),
+        ({"error": "failed to load model"}, quality.FAILURE_REASON_MODEL_LOAD_FAILED),
+        ({"error": "this model does not support tool calling"}, quality.FAILURE_REASON_UNSUPPORTED_RUNTIME),
+        ({"error": "something else entirely"}, quality.FAILURE_REASON_UNKNOWN),
+        (None, quality.FAILURE_REASON_UNKNOWN),
+    ],
+)
+def test_classify_error_response_maps_ollama_error_bodies(body, expected):
+    assert quality._classify_error_response(_FakeResponse(500, body)) == expected
+
+
+def test_request_json_classifies_connect_timeout_as_ollama_unavailable(monkeypatch):
+    monkeypatch.setattr(
+        quality.requests, "request",
+        lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectTimeout("no route")),
+    )
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._request_json("GET", "/api/tags")
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_OLLAMA_UNAVAILABLE
+
+
+def test_request_json_classifies_read_timeout_as_generation_timeout(monkeypatch):
+    monkeypatch.setattr(
+        quality.requests, "request",
+        lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ReadTimeout("slow")),
+    )
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._request_json("POST", "/api/generate")
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_GENERATION_TIMEOUT
+
+
+def test_request_json_classifies_connection_error_as_connection_error(monkeypatch):
+    monkeypatch.setattr(
+        quality.requests, "request",
+        lambda *a, **k: (_ for _ in ()).throw(requests.exceptions.ConnectionError("reset by peer")),
+    )
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._request_json("GET", "/api/ps")
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_CONNECTION_ERROR
+
+
+def test_request_json_classifies_oom_response_as_out_of_memory(monkeypatch):
+    monkeypatch.setattr(
+        quality.requests, "request",
+        lambda *a, **k: _FakeResponse(500, {"error": "model requires more system memory than is available"}),
+    )
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._request_json("POST", "/api/generate", {})
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_OUT_OF_MEMORY
+
+
+def test_request_json_defaults_unclassified_http_errors_to_unknown(monkeypatch):
+    monkeypatch.setattr(
+        quality.requests, "request", lambda *a, **k: _FakeResponse(503, {"error": "temporarily busy"})
+    )
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._request_json("GET", "/api/tags")
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_UNKNOWN
+
+
+@pytest.mark.parametrize("reason", sorted(quality.MODEL_UNFIT_REASONS))
+def test_outcome_for_failure_reason_model_unfit_lane(reason):
+    assert quality.outcome_for_failure_reason(reason) == "model_unfit"
+
+
+@pytest.mark.parametrize("reason", sorted(quality.TRANSIENT_ERROR_REASONS))
+def test_outcome_for_failure_reason_transient_lane(reason):
+    assert quality.outcome_for_failure_reason(reason) == "transient_error"
+
+
+def test_quality_evaluation_error_falls_back_to_unknown_for_bad_reason():
+    error = quality.QualityEvaluationError("boom", failure_reason="not-a-real-reason")
+    assert error.failure_reason == quality.FAILURE_REASON_UNKNOWN
+
+
+def test_collect_evidence_preserves_sibling_results_after_one_model_fails(monkeypatch):
+    """A model that OOMs must not take down models already evaluated - and
+    the loop must still evaluate whatever comes after it."""
+    monkeypatch.setattr(quality, "ollama_version", lambda: "0.32.1")
+    monkeypatch.setattr(
+        quality,
+        "_model_metadata",
+        lambda tag: {
+            "tag": tag, "digest": "sha256:" + "a" * 64, "size_bytes": 900_000_000,
+            "format": "gguf", "family": "test", "parameter_size": "7B",
+            "quantization_level": "Q4_K_M", "license": None, "license_link": None,
+            "capabilities": [],
+        },
+    )
+
+    def fake_evaluate(tag, pack, speed_runs=3, runtime_options=None, model_metadata=None):
+        if tag == "big:latest":
+            raise quality.QualityEvaluationError(
+                "simulated OOM at /some/local/path", failure_reason=quality.FAILURE_REASON_OUT_OF_MEMORY
+            )
+        return {
+            "tag": tag,
+            "quality": {"correct": 6, "total": 8, "accuracy": 0.75},
+            "speed": {"median_tokens_per_sec": 40.0, "samples_tokens_per_sec": [40.0], "runs": 1},
+        }
+
+    monkeypatch.setattr(quality, "evaluate_model", fake_evaluate)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+
+    report = quality.collect_evidence(["small:latest", "big:latest", "third:latest"], _hardware())
+
+    by_tag = {m["tag"]: m for m in report["models"]}
+    assert set(by_tag) == {"small:latest", "big:latest", "third:latest"}
+    assert by_tag["small:latest"]["outcome"] == "success"
+    assert by_tag["small:latest"]["speed"]["median_tokens_per_sec"] == 40.0
+    assert by_tag["third:latest"]["outcome"] == "success"
+    assert by_tag["big:latest"]["outcome"] == "model_unfit"
+    assert by_tag["big:latest"]["failure_reason"] == "out_of_memory"
+    assert "tokens_per_sec" not in by_tag["big:latest"]
+    assert "speed" not in by_tag["big:latest"]
+    assert "sample_count" not in by_tag["big:latest"]
+    assert by_tag["big:latest"]["model_metadata"]["parameter_size"] == "7B"
+    assert "simulated OOM" not in json.dumps(report)
+
+
+def test_collect_evidence_classifies_daemon_unreachable_as_transient(monkeypatch):
+    monkeypatch.setattr(quality, "ollama_version", lambda: None)
+
+    def raising_metadata(tag):
+        raise quality.QualityEvaluationError(
+            "connection refused by 10.0.0.5", failure_reason=quality.FAILURE_REASON_OLLAMA_UNAVAILABLE
+        )
+
+    def raising_evaluate(tag, pack, speed_runs=3):
+        raise quality.QualityEvaluationError(
+            "connection refused by 10.0.0.5", failure_reason=quality.FAILURE_REASON_OLLAMA_UNAVAILABLE
+        )
+
+    monkeypatch.setattr(quality, "_model_metadata", raising_metadata)
+    monkeypatch.setattr(quality, "evaluate_model", raising_evaluate)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: False)
+
+    report = quality.collect_evidence(["small:latest"], _hardware())
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["failure_reason"] == "ollama_unavailable"
+    assert "model_metadata" not in entry
+    assert "attempted_runtime" not in entry
+
+
+def test_model_unfit_reasons_are_narrow_and_explicit():
+    """Only reasons Ollama's own response makes explicit belong here. A
+    missing file, a corrupted one, or any other undiagnosed load failure is
+    not proof the model doesn't fit this hardware."""
+    assert quality.MODEL_UNFIT_REASONS == {
+        quality.FAILURE_REASON_OUT_OF_MEMORY,
+        quality.FAILURE_REASON_UNSUPPORTED_RUNTIME,
+    }
+    assert quality.FAILURE_REASON_MODEL_LOAD_FAILED in quality.TRANSIENT_ERROR_REASONS
+
+
+def test_outcome_for_model_load_failed_is_transient_not_unfit():
+    assert quality.outcome_for_failure_reason(quality.FAILURE_REASON_MODEL_LOAD_FAILED) == "transient_error"
+
+
+def test_model_metadata_not_installed_is_classified_as_transient(monkeypatch):
+    """A tag that isn't installed yet could simply not be downloaded - it is
+    not evidence this hardware can't run the model."""
+
+    def fake_request(method, path, payload=None, timeout=10):
+        assert path == "/api/tags"
+        return {"models": []}
+
+    monkeypatch.setattr(quality, "_request_json", fake_request)
+
+    with pytest.raises(quality.QualityEvaluationError) as excinfo:
+        quality._model_metadata("missing:latest")
+    assert excinfo.value.failure_reason == quality.FAILURE_REASON_MODEL_LOAD_FAILED
+    assert quality.outcome_for_failure_reason(excinfo.value.failure_reason) == "transient_error"
+
+
+def test_collect_evidence_classifies_missing_model_file_as_transient_not_unfit(monkeypatch):
+    monkeypatch.setattr(quality, "ollama_version", lambda: "0.32.1")
+
+    def raising_metadata(tag):
+        raise quality.QualityEvaluationError(
+            f"Ollama model '{tag}' is not installed", failure_reason=quality.FAILURE_REASON_MODEL_LOAD_FAILED
+        )
+
+    def raising_evaluate(tag, pack, speed_runs=3):
+        raise quality.QualityEvaluationError(
+            f"Ollama model '{tag}' is not installed", failure_reason=quality.FAILURE_REASON_MODEL_LOAD_FAILED
+        )
+
+    monkeypatch.setattr(quality, "_model_metadata", raising_metadata)
+    monkeypatch.setattr(quality, "evaluate_model", raising_evaluate)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: False)
+
+    report = quality.collect_evidence(["missing:latest"], _hardware())
+
+    entry = report["models"][0]
+    assert entry["outcome"] == "transient_error"
+    assert entry["failure_reason"] == "model_load_failed"
+
+
+def test_failure_entry_never_leaks_raw_exception_text_paths_or_ips(monkeypatch):
+    monkeypatch.setattr(quality, "ollama_version", lambda: None)
+    secret_message = "C:\\Users\\alice\\secret\\path connection refused by 10.0.0.5"
+
+    def raising_metadata(tag):
+        raise quality.QualityEvaluationError(secret_message, failure_reason=quality.FAILURE_REASON_CONNECTION_ERROR)
+
+    def raising_evaluate(tag, pack, speed_runs=3):
+        raise quality.QualityEvaluationError(secret_message, failure_reason=quality.FAILURE_REASON_CONNECTION_ERROR)
+
+    monkeypatch.setattr(quality, "_model_metadata", raising_metadata)
+    monkeypatch.setattr(quality, "evaluate_model", raising_evaluate)
+    monkeypatch.setattr(quality, "unload_model", lambda tag: True)
+
+    report = quality.collect_evidence(["small:latest"], _hardware())
+
+    serialized = json.dumps(report)
+    assert secret_message not in serialized
+    assert "10.0.0.5" not in serialized
+    assert "alice" not in serialized
+    entry = report["models"][0]
+    assert entry["failure_reason"] == "connection_error"
+    assert set(entry.keys()) <= {
+        "tag", "outcome", "failure_reason", "measurement_isolation", "model_metadata", "attempted_runtime",
+    }

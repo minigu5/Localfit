@@ -2243,28 +2243,45 @@ def benchmark_cmd(
             err_console.print(f"[red]{error}[/red]")
             raise typer.Exit(1) from error
 
-        table = Table(title="Localfit reproducible quality evidence")
-        table.add_column("Model", style="cyan")
-        table.add_column("Parameters")
-        table.add_column("Quantization")
-        table.add_column("Quality", justify="right")
-        table.add_column("Speed", justify="right")
-        for model in report["models"]:
-            model_quality = model["quality"]
-            table.add_row(
-                str(model["tag"]),
-                str(model.get("parameter_size") or "unknown"),
-                str(model.get("quantization_level") or "unknown"),
-                (
-                    f"{model_quality['correct']}/{model_quality['total']} "
-                    f"({model_quality['accuracy'] * 100:.1f}%)"
-                ),
-                f"{model['speed']['median_tokens_per_sec']:.1f} tok/s",
+        successes = [m for m in report["models"] if m.get("outcome", "success") == "success"]
+        model_unfit = [m for m in report["models"] if m.get("outcome") == "model_unfit"]
+        transient = [m for m in report["models"] if m.get("outcome") == "transient_error"]
+
+        if successes:
+            table = Table(title="Localfit reproducible quality evidence")
+            table.add_column("Model", style="cyan")
+            table.add_column("Parameters")
+            table.add_column("Quantization")
+            table.add_column("Quality", justify="right")
+            table.add_column("Speed", justify="right")
+            for model in successes:
+                model_quality = model["quality"]
+                table.add_row(
+                    str(model["tag"]),
+                    str(model.get("parameter_size") or "unknown"),
+                    str(model.get("quantization_level") or "unknown"),
+                    (
+                        f"{model_quality['correct']}/{model_quality['total']} "
+                        f"({model_quality['accuracy'] * 100:.1f}%)"
+                    ),
+                    f"{model['speed']['median_tokens_per_sec']:.1f} tok/s",
+                )
+            console.print(table)
+
+        for entry in model_unfit:
+            err_console.print(
+                f"[yellow]{entry['tag']}: doesn't fit this hardware "
+                f"({entry.get('failure_reason', 'unknown')})[/yellow]"
             )
-        console.print(table)
+        for entry in transient:
+            err_console.print(
+                f"[yellow]{entry['tag']}: temporary error, not a hardware verdict "
+                f"({entry.get('failure_reason', 'unknown')})[/yellow]"
+            )
+
         console.print(f"[green]Saved reproducible local evidence to {output}.[/green]")
         console.print(
-            "[dim]No generated text is stored. v6 telemetry includes CPU model, "
+            "[dim]No generated text is stored. v6/v7 telemetry includes CPU model, "
             "architecture, and core counts; it excludes GPU names. "
             "aggregate numbers may be shared below. Not a leaderboard.[/dim]"
         )
@@ -2272,7 +2289,7 @@ def benchmark_cmd(
             "Send these benchmark results to the server to help train the recommendation model?"
         ):
             registry_entries = registry.load_registry()
-            for model in report["models"]:
+            for model in successes:
                 entry = next(
                     (e for e in registry_entries.values() if e.get("ollama_name") == model["tag"]),
                     None,
@@ -2299,8 +2316,18 @@ def benchmark_cmd(
                     model_filename=(entry or {}).get("filename") or model["tag"],
                     model_digest=model.get("digest"),
                 )
+            for entry in model_unfit + transient:
+                _report_failure_telemetry(entry, report.get("environment", {}))
+
+        console.print(
+            f"[bold]Summary:[/bold] {len(successes)} succeeded, "
+            f"{len(model_unfit)} model_unfit, {len(transient)} transient_error",
+            highlight=False,
+        )
         if json_output:
             console.print_json(data=report)
+        if not successes:
+            raise typer.Exit(1)
     finally:
         if started_daemon is not None:
             benchmark.stop_ollama_daemon(started_daemon)
@@ -2423,6 +2450,105 @@ def _report_telemetry(
     sent = telemetry.send_event(event, force=True)
     if not sent:
         console.print("[dim]Telemetry not sent (will retry next time you run omm).[/dim]")
+    return sent
+
+
+def _report_failure_telemetry(model: dict, environment: dict) -> bool:
+    """Upload a v7 model_unfit/transient_error event.
+
+    Never sends tokens_per_sec, sample_count, or any speed field - a failed
+    benchmark has no real measurement, and schema/tests/model_quality_gate.py
+    rely on that absence to keep this out of the speed-regression dataset.
+    See docs/telemetry-v7.md for the full contract.
+    """
+    outcome = model.get("outcome")
+    reason = model.get("failure_reason")
+    if outcome not in ("model_unfit", "transient_error") or not isinstance(reason, str):
+        return False
+    info = scan_hardware()
+    tag = model.get("tag")
+    event: dict = {
+        "ram_gb": round(info.ram_total_gb, 1),
+        "vram_gb": round(info.vram_total_gb, 1) if info.vram_total_gb is not None else None,
+        "unified_memory": info.unified_memory,
+        "model_installed": _safe_model_filename(tag) or str(tag)[:512],
+        "engine": "ollama",
+        "benchmark_version": 7,
+        "outcome": outcome,
+        "failure_reason": reason,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),
+    }
+    engine_version = environment.get("engine_version")
+    if isinstance(engine_version, str) and engine_version:
+        event["engine_version"] = engine_version
+    client_version = _client_version()
+    if client_version:
+        event["client_version"] = client_version
+    complete_cpu = _complete_cpu_metadata(info)
+    if complete_cpu:
+        event.update(complete_cpu)
+
+    # Best-effort model metadata: present whenever the failure happened after
+    # /api/show succeeded (e.g. an out-of-memory load), absent when the model
+    # couldn't even be looked up (e.g. not installed).
+    metadata = model.get("model_metadata") or {}
+
+    def _number(*keys: str) -> float | None:
+        for key in keys:
+            value = metadata.get(key)
+            if (
+                isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value > 0
+            ):
+                return float(value)
+        return None
+
+    candidate = {
+        "name": tag,
+        "filename": tag,
+        "repo_id": None,
+        "size_bytes": metadata.get("size_bytes"),
+    }
+    parameter_count = _number("parameter_count_b")
+    if parameter_count is None:
+        value = metadata.get("parameter_size")
+        parameter_count = parse_param_count_billions(value) if isinstance(value, str) else None
+    if parameter_count is None:
+        parameter_count = candidate_parameter_count_billions(candidate)
+    quant_bits = _number("quant_bits")
+    if quant_bits is None:
+        value = metadata.get("quantization_level")
+        quant_bits = parse_quant_bits(value) if isinstance(value, str) else None
+    if quant_bits is None:
+        quant_bits = candidate_quant_bits(candidate)
+    active_parameter_count = candidate_active_parameter_count_billions(candidate)
+    if active_parameter_count is None:
+        active_parameter_count = parameter_count
+    if parameter_count is not None:
+        event["parameter_count_b"] = parameter_count
+    if active_parameter_count is not None:
+        event["active_parameter_count_b"] = active_parameter_count
+    if quant_bits is not None:
+        event["quant_bits"] = quant_bits
+    if isinstance(metadata.get("size_bytes"), int) and metadata["size_bytes"] > 0:
+        event["model_size_bytes"] = metadata["size_bytes"]
+
+    # The runtime omm *attempted* (chosen before the model failed to load),
+    # not a live introspection - a model that never loaded can't be found
+    # in /api/ps. Only attach it when every field is well-formed.
+    attempted_runtime = model.get("attempted_runtime")
+    if isinstance(attempted_runtime, dict):
+        fields = ("context_length", "gpu_offload_percent", "cpu_threads", "num_batch")
+        if all(
+            isinstance(attempted_runtime.get(key), int) and not isinstance(attempted_runtime[key], bool)
+            for key in fields
+        ):
+            event.update({key: attempted_runtime[key] for key in fields})
+            event["runtime_profile"] = "explicit_ollama_options"
+
+    sent = telemetry.send_event(event, force=True)
+    if not sent:
+        console.print(f"[dim]Telemetry not sent for {tag} (will retry next time you run omm).[/dim]")
     return sent
 
 

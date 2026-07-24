@@ -203,3 +203,51 @@ def test_compare_allows_sufficient_selection_evidence():
 
     assert report["passed"] is True
     assert report["failures"] == []
+
+
+# --- explicit fit labels (v7 outcome), backward-compatible fallback -------
+
+
+def test_evaluate_artifact_prefers_explicit_fit_labels_over_speed_threshold():
+    # The artifact predicts 0.0 (unfit) for feature [0.0, 0.0] and 3.0 (fit)
+    # for [1.0, 0.0]; y >= 1.0 would call BOTH of these "fit" under the
+    # legacy heuristic (y=[2.0, 2.0]), but the explicit label says the first
+    # one is actually a known-unfit configuration.
+    tree = {
+        "feature": 0, "threshold": 0.5,
+        "left": {"leaf": True, "value": 0.0},
+        "right": {"leaf": True, "value": 3.0},
+    }
+    model = artifact(0.0, tree=tree)
+
+    metrics = evaluate_artifact(
+        model, X, Y,
+        fit_examples=[([0.0, 0.0], False), ([1.0, 0.0], True)],
+    )
+
+    assert metrics["fit_balanced_accuracy"] == 1.0
+    assert metrics["fit_false_positive_rate"] == 0.0
+
+
+def test_evaluate_artifact_falls_back_to_legacy_threshold_without_fit_examples():
+    # Same artifact/X/Y as the selection tests above: omitting fit_examples
+    # must reproduce the exact pre-v7 behavior (inferred from y >= 1.0).
+    metrics_without = evaluate_artifact(selection_artifact(), SELECTION_X, SELECTION_Y)
+    metrics_with_empty = evaluate_artifact(selection_artifact(), SELECTION_X, SELECTION_Y, fit_examples=[])
+
+    assert metrics_without["fit_balanced_accuracy"] == 1.0
+    assert metrics_without["fit_false_positive_rate"] == 0.0
+    assert metrics_with_empty == metrics_without
+
+
+def test_compare_artifacts_forwards_fit_examples_to_both_models():
+    fit_examples = [([0.0, 0.0], False), ([1.0, 0.0], False), ([2.0, 0.0], True)]
+
+    report = compare_artifacts(
+        artifact(2.0), artifact(2.0), X, Y, fit_examples=fit_examples,
+    )
+
+    # Both models predict a constant 2.0 (>= 1.0) for every row, so every
+    # explicit-False example is a false positive under the explicit labels.
+    assert report["candidate"]["fit_false_positive_rate"] == 1.0
+    assert report["baseline"]["fit_false_positive_rate"] == 1.0

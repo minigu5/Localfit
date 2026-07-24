@@ -259,6 +259,7 @@ def test_training_audit_explains_rejections_and_duplicate_collapse():
         "samples_capped": 0,
         "unique_configurations": 1,
         "direct_v6_unique_configurations": 0,
+        "direct_v7_unique_configurations": 0,
         "duplicates_collapsed": 1,
         "rejections": {
             "invalid_measurement": 1,
@@ -483,7 +484,9 @@ def test_quality_gate_regression_does_not_overwrite_output(tmp_path, monkeypatch
         )
     )
     monkeypatch.setattr(
-        train_model, "compare_artifacts", lambda *_args: {"passed": False, "failures": ["forced"]}
+        train_model,
+        "compare_artifacts",
+        lambda *_args, **_kwargs: {"passed": False, "failures": ["forced"]},
     )
     monkeypatch.setattr(
         train_model,
@@ -579,3 +582,222 @@ def test_offline_training_exports_v4_with_64_trees(tmp_path, monkeypatch):
     assert artifact["feature_schema_version"] == 1
     assert artifact["evaluation"] is None
     assert len(artifact["trees"]) == 64
+
+
+# --- v7: structured success/failure telemetry ------------------------------
+
+
+def _v7_success_row(speed: float, **overrides) -> dict:
+    defaults = dict(
+        benchmark_version=7,
+        outcome="success",
+        parameter_count_b=7.0,
+        active_parameter_count_b=3.0,
+        quant_bits=4.0,
+        engine_version="1.0",
+        client_version="1.0",
+        runtime_profile="throughput",
+        cpu_model="AMD Ryzen 5 5600X",
+        cpu_arch="x86_64",
+        cpu_physical_cores=6,
+        cpu_logical_cores=12,
+        sample_count=3,
+        tokens_per_sec_min=speed - 1,
+        tokens_per_sec_max=speed + 1,
+    )
+    defaults.update(overrides)
+    return _row(speed, **defaults)
+
+
+def _v7_model_unfit_row(**overrides) -> dict:
+    row = {
+        "engine": "ollama",
+        "benchmark_version": 7,
+        "outcome": "model_unfit",
+        "failure_reason": "out_of_memory",
+        "ram_gb": 16,
+        "vram_gb": 8,
+        "unified_memory": False,
+        "model_installed": "big-model-70B-Q4.gguf",
+        "parameter_count_b": 70.0,
+        "active_parameter_count_b": 70.0,
+        "quant_bits": 4.0,
+        "engine_version": "1.0",
+        "client_version": "1.0",
+        "runtime_profile": "throughput",
+        "context_length": 4096,
+        "gpu_offload_percent": 100,
+        "cpu_threads": 8,
+        "num_batch": 512,
+        "cpu_model": "AMD Ryzen 5 5600X",
+        "cpu_arch": "x86_64",
+        "cpu_physical_cores": 6,
+        "cpu_logical_cores": 12,
+    }
+    row.update(overrides)
+    return row
+
+
+def _v7_transient_row(**overrides) -> dict:
+    row = {
+        "engine": "ollama",
+        "benchmark_version": 7,
+        "outcome": "transient_error",
+        "failure_reason": "ollama_unavailable",
+        "ram_gb": 16,
+        "unified_memory": False,
+        "model_installed": "small-model-1B-Q4.gguf",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_v7_success_is_accepted_like_v6_and_counted_as_direct_v7():
+    X, y, audit = train_model.real_rows_to_training_data_with_audit([_v7_success_row(20)])
+
+    assert len(X) == 1
+    assert y == [20]
+    assert audit["direct_v6_unique_configurations"] == 0
+    assert audit["direct_v7_unique_configurations"] == 1
+    assert audit["rejections"] == {}
+
+
+def test_v7_model_unfit_is_excluded_from_speed_regression_without_faking_zero():
+    X, y, audit = train_model.real_rows_to_training_data_with_audit([_v7_model_unfit_row()])
+
+    assert X == [] and y == []
+    assert audit["rejections"] == {"model_unfit_excluded_from_regression": 1}
+    assert audit["direct_v6_unique_configurations"] == 0
+    assert audit["direct_v7_unique_configurations"] == 0
+
+
+def test_v7_transient_error_is_excluded_from_speed_regression():
+    X, y, audit = train_model.real_rows_to_training_data_with_audit([_v7_transient_row()])
+
+    assert X == [] and y == []
+    assert audit["rejections"] == {"transient_error_excluded": 1}
+
+
+def test_v7_invalid_outcome_is_rejected():
+    _sample, reason = train_model._real_row_to_sample(_v7_success_row(20, outcome="maybe"))
+    assert reason == "invalid_outcome"
+
+
+def test_v7_missing_outcome_is_rejected():
+    row = _v7_success_row(20)
+    del row["outcome"]
+    _sample, reason = train_model._real_row_to_sample(row)
+    assert reason == "invalid_outcome"
+
+
+def test_validate_dataset_sums_direct_v6_and_v7_configurations():
+    _X, _y, audit = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20, model_installed="other.gguf", parameter_count_b=3.0)]
+    )
+
+    assert audit["direct_v6_unique_configurations"] == 1
+    assert audit["direct_v7_unique_configurations"] == 1
+    validate_dataset(audit, min_unique_configurations=2)  # must not raise
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
+        validate_dataset(audit, min_unique_configurations=3)
+
+
+def test_validate_dataset_excludes_intentional_v7_exclusions_from_rejection_rate():
+    rows = [_v6_row(10)] + [_v7_model_unfit_row() for _ in range(10)]
+    _X, _y, audit = train_model.real_rows_to_training_data_with_audit(rows)
+
+    assert audit["rejected_rows"] == 10
+    assert audit["raw_rows"] == 11
+    # A naive rejected/raw ratio would be 10/11 (~91%) and fail any sane
+    # rejection-rate gate, even though every one of those 10 rows is a
+    # legitimate, correctly-classified model_unfit failure event - not bad
+    # data. validate_dataset must not punish a healthy stream of v7 failure
+    # telemetry this way.
+    validate_dataset(audit, min_unique_configurations=1, max_rejection_rate=0.25)
+
+
+def test_real_rows_to_fit_training_data_separates_success_and_model_unfit():
+    rows = [
+        _v6_row(20),
+        _v7_success_row(30, model_installed="other.gguf", parameter_count_b=3.0),
+        _v7_model_unfit_row(),
+        _v7_transient_row(),
+    ]
+
+    fit_X, fit_y, audit = train_model.real_rows_to_fit_training_data_with_audit(rows)
+
+    assert fit_y.count(True) == 2
+    assert fit_y.count(False) == 1
+    assert len(fit_X) == 3
+    assert audit["positive_examples"] == 2
+    assert audit["negative_examples"] == 1
+    assert audit["rejections"] == {"transient_error_excluded": 1}
+
+
+def test_real_rows_to_fit_training_data_model_unfit_needs_no_speed_fields():
+    row = _v7_model_unfit_row()
+    assert "tokens_per_sec" not in row
+    assert "sample_count" not in row
+
+    fit_X, fit_y, audit = train_model.real_rows_to_fit_training_data_with_audit([row])
+
+    assert fit_y == [False]
+    assert audit["rejected_rows"] == 0
+
+
+def test_real_rows_to_fit_training_data_model_unfit_still_requires_model_metadata():
+    row = _v7_model_unfit_row()
+    del row["parameter_count_b"]
+
+    fit_X, fit_y, audit = train_model.real_rows_to_fit_training_data_with_audit([row])
+
+    assert fit_X == [] and fit_y == []
+    assert audit["rejections"] == {"missing_model_metadata": 1}
+
+
+def test_real_rows_to_fit_training_data_legacy_v1_v6_rows_are_implicit_positives():
+    """v1-v6 telemetry cannot express a failure at all, so every valid
+    legacy row is an implicit success - the documented backward-
+    compatibility path for the fit dataset."""
+    fit_X, fit_y, audit = train_model.real_rows_to_fit_training_data_with_audit(
+        [_row(10), _row(20, vram_gb=6)]
+    )
+
+    assert fit_y == [True, True]
+    assert audit["positive_examples"] == 2
+    assert audit["negative_examples"] == 0
+
+
+def test_v7_outcome_contract_across_both_datasets():
+    """Single source of truth for the v7 outcome contract:
+    - success -> positive fit label AND a real speed-regression sample.
+    - model_unfit -> negative fit label, excluded from speed regression
+      (no faked tokens_per_sec).
+    - transient_error -> excluded from BOTH datasets entirely; it is never
+      a fit label (positive or negative) and never a speed sample.
+    """
+    success = _v7_success_row(42, model_installed="ok.gguf")
+    unfit = _v7_model_unfit_row(model_installed="oom.gguf")
+    transient = _v7_transient_row(model_installed="flaky.gguf")
+    rows = [success, unfit, transient]
+
+    speed_X, speed_y, speed_audit = train_model.real_rows_to_training_data_with_audit(rows)
+    fit_X, fit_y, fit_audit = train_model.real_rows_to_fit_training_data_with_audit(rows)
+
+    # Speed regression: only the success row contributes, with its real
+    # tokens_per_sec - never a synthesized value for the other two.
+    assert speed_y == [42]
+    assert speed_audit["valid_rows"] == 1
+    assert speed_audit["rejections"] == {
+        "model_unfit_excluded_from_regression": 1,
+        "transient_error_excluded": 1,
+    }
+
+    # Fit classification: success is the only positive, model_unfit is the
+    # only negative, transient_error contributes to neither.
+    assert fit_y.count(True) == 1
+    assert fit_y.count(False) == 1
+    assert len(fit_X) == 2
+    assert fit_audit["positive_examples"] == 1
+    assert fit_audit["negative_examples"] == 1
+    assert fit_audit["rejections"] == {"transient_error_excluded": 1}
