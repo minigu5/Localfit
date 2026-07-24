@@ -32,9 +32,68 @@ MAX_PROMPT_CHARS = 10_000
 _FINAL_NUMBER_RE = re.compile(r"FINAL\s*[:=]\s*([-+]?\d[\d,]*(?:\.\d+)?)", re.IGNORECASE)
 _ANY_NUMBER_RE = re.compile(r"[-+]?\d[\d,]*(?:\.\d+)?")
 
+# v7 failure taxonomy (see docs/telemetry-v7.md). Every QualityEvaluationError
+# carries one of these so callers can classify without parsing free-text
+# messages - which may reference exception internals, paths, etc. that must
+# never reach telemetry.
+FAILURE_REASON_OUT_OF_MEMORY = "out_of_memory"
+FAILURE_REASON_MODEL_LOAD_FAILED = "model_load_failed"
+FAILURE_REASON_UNSUPPORTED_RUNTIME = "unsupported_runtime"
+FAILURE_REASON_GENERATION_TIMEOUT = "generation_timeout"
+FAILURE_REASON_OLLAMA_UNAVAILABLE = "ollama_unavailable"
+FAILURE_REASON_CONNECTION_ERROR = "connection_error"
+FAILURE_REASON_NO_TIMING_METRICS = "no_timing_metrics"
+FAILURE_REASON_UNKNOWN = "unknown"
+
+# A model/hardware combination that will never work regardless of retries.
+# Deliberately narrow: only reasons Ollama's own response makes explicit.
+# "model_load_failed" is NOT here - a missing/undownloaded file or a plain,
+# undiagnosed load failure is not evidence the model doesn't fit this
+# hardware (it may simply not be present yet, or hit a transient I/O
+# error), so it lives in the transient lane below instead.
+MODEL_UNFIT_REASONS = frozenset({
+    FAILURE_REASON_OUT_OF_MEMORY,
+    FAILURE_REASON_UNSUPPORTED_RUNTIME,
+})
+# A one-off/environmental/inconclusive hiccup that says nothing about
+# whether the model fits this hardware.
+TRANSIENT_ERROR_REASONS = frozenset({
+    FAILURE_REASON_MODEL_LOAD_FAILED,
+    FAILURE_REASON_GENERATION_TIMEOUT,
+    FAILURE_REASON_OLLAMA_UNAVAILABLE,
+    FAILURE_REASON_CONNECTION_ERROR,
+    FAILURE_REASON_NO_TIMING_METRICS,
+    FAILURE_REASON_UNKNOWN,
+})
+FAILURE_REASONS = MODEL_UNFIT_REASONS | TRANSIENT_ERROR_REASONS
+
+
+def outcome_for_failure_reason(failure_reason: str) -> str:
+    """Map a failure_reason onto its fixed outcome lane.
+
+    When classification is uncertain, callers should pick
+    FAILURE_REASON_UNKNOWN rather than guess - this function then reports
+    "transient_error" rather than "model_unfit", per the project's policy of
+    never over-claiming that a model is unfit for hardware it merely had a
+    one-off problem on.
+    """
+    return "model_unfit" if failure_reason in MODEL_UNFIT_REASONS else "transient_error"
+
 
 class QualityEvaluationError(RuntimeError):
-    """Raised when the pack or local Ollama response cannot be trusted."""
+    """Raised when the pack or local Ollama response cannot be trusted.
+
+    Carries a structured `failure_reason` (one of FAILURE_REASONS) so
+    `collect_evidence` can build v7 failure telemetry without inspecting
+    the free-text message, which may embed paths or exception internals
+    that must never be sent to Firebase.
+    """
+
+    def __init__(self, message: str, *, failure_reason: str = FAILURE_REASON_UNKNOWN) -> None:
+        super().__init__(message)
+        if failure_reason not in FAILURE_REASONS:
+            failure_reason = FAILURE_REASON_UNKNOWN
+        self.failure_reason = failure_reason
 
 
 @dataclass(frozen=True)
@@ -135,6 +194,51 @@ def parse_numeric_answer(response: str) -> str | None:
     return _normalize_number(matches[-1]) if matches else None
 
 
+_OOM_MARKERS = (
+    "out of memory", "requires more system memory", "requires more than",
+    "not enough memory", "cuda out of memory", "insufficient memory",
+    "requires more available memory",
+)
+# Deliberately maps to the transient lane (FAILURE_REASON_MODEL_LOAD_FAILED
+# is in TRANSIENT_ERROR_REASONS, not MODEL_UNFIT_REASONS): "failed to load"
+# covers a missing/undownloaded file, a corrupted one, or any other
+# undiagnosed load error just as often as a real hardware mismatch, so it
+# is never treated as proof the model doesn't fit this machine.
+_MODEL_LOAD_FAILED_MARKERS = (
+    "failed to load", "unable to load", "no slots available", "not found",
+    "invalid model", "could not load",
+)
+_UNSUPPORTED_RUNTIME_MARKERS = ("does not support", "not supported", "unsupported")
+
+
+def _classify_error_response(response) -> str:
+    """Best-effort classification from Ollama's own error body.
+
+    Only used to pick a fixed enum value locally - the message text itself
+    is discarded and never forwarded to telemetry.
+    """
+    message = ""
+    try:
+        body = response.json()
+        if isinstance(body, dict):
+            message = str(body.get("error", ""))
+    except ValueError:
+        pass
+    if not message:
+        try:
+            message = response.text[:2000]
+        except Exception:
+            message = ""
+    lowered = message.lower()
+    if any(marker in lowered for marker in _OOM_MARKERS):
+        return FAILURE_REASON_OUT_OF_MEMORY
+    if any(marker in lowered for marker in _MODEL_LOAD_FAILED_MARKERS):
+        return FAILURE_REASON_MODEL_LOAD_FAILED
+    if any(marker in lowered for marker in _UNSUPPORTED_RUNTIME_MARKERS):
+        return FAILURE_REASON_UNSUPPORTED_RUNTIME
+    return FAILURE_REASON_UNKNOWN
+
+
 def _request_json(method: str, path: str, payload: dict | None = None, timeout: int = 180) -> dict:
     try:
         response = requests.request(
@@ -143,12 +247,37 @@ def _request_json(method: str, path: str, payload: dict | None = None, timeout: 
             json=payload,
             timeout=timeout,
         )
-        response.raise_for_status()
+    except requests.exceptions.ConnectTimeout as error:
+        raise QualityEvaluationError(
+            f"Ollama {path} did not accept a connection", failure_reason=FAILURE_REASON_OLLAMA_UNAVAILABLE
+        ) from error
+    except requests.exceptions.ReadTimeout as error:
+        raise QualityEvaluationError(
+            f"Ollama {path} did not respond in time", failure_reason=FAILURE_REASON_GENERATION_TIMEOUT
+        ) from error
+    except requests.exceptions.ConnectionError as error:
+        raise QualityEvaluationError(
+            f"Ollama {path} connection was interrupted", failure_reason=FAILURE_REASON_CONNECTION_ERROR
+        ) from error
+    except requests.RequestException as error:
+        raise QualityEvaluationError(
+            f"Ollama {path} request failed", failure_reason=FAILURE_REASON_UNKNOWN
+        ) from error
+    if not response.ok:
+        raise QualityEvaluationError(
+            f"Ollama {path} returned HTTP {response.status_code}",
+            failure_reason=_classify_error_response(response),
+        )
+    try:
         data = response.json()
-    except (requests.RequestException, ValueError) as error:
-        raise QualityEvaluationError(f"Ollama {path} request failed: {error}") from error
+    except ValueError as error:
+        raise QualityEvaluationError(
+            f"Ollama {path} returned invalid JSON", failure_reason=FAILURE_REASON_UNKNOWN
+        ) from error
     if not isinstance(data, dict):
-        raise QualityEvaluationError(f"Ollama {path} returned a non-object response")
+        raise QualityEvaluationError(
+            f"Ollama {path} returned a non-object response", failure_reason=FAILURE_REASON_UNKNOWN
+        )
     return data
 
 
@@ -174,10 +303,18 @@ def _tag_matches(name: object, tag: str) -> bool:
 def _model_metadata(tag: str) -> dict:
     tags = _request_json("GET", "/api/tags", timeout=10).get("models")
     if not isinstance(tags, list):
-        raise QualityEvaluationError("Ollama model list is missing")
+        raise QualityEvaluationError(
+            "Ollama model list is missing", failure_reason=FAILURE_REASON_UNKNOWN
+        )
     listed = next((item for item in tags if isinstance(item, dict) and _tag_matches(item.get("name"), tag)), None)
     if listed is None:
-        raise QualityEvaluationError(f"Ollama model '{tag}' is not installed")
+        # Not present locally - could mean "never downloaded" as easily as
+        # "doesn't fit this hardware." FAILURE_REASON_MODEL_LOAD_FAILED is a
+        # transient reason for exactly this ambiguity; never claim model_unfit
+        # from an absent file alone.
+        raise QualityEvaluationError(
+            f"Ollama model '{tag}' is not installed", failure_reason=FAILURE_REASON_MODEL_LOAD_FAILED
+        )
     listed_details = listed.get("details")
     if isinstance(listed_details, dict) and listed_details.get("family") == "clip":
         # A linked-but-broken mmproj (multimodal projector) model: it was
@@ -187,7 +324,8 @@ def _model_metadata(tag: str) -> dict:
         # results - fail fast with a clear reason instead of an opaque 500.
         raise QualityEvaluationError(
             f"Ollama model '{tag}' is a multimodal projector (mmproj), not a "
-            "standalone text-generation model - it can't be benchmarked."
+            "standalone text-generation model - it can't be benchmarked.",
+            failure_reason=FAILURE_REASON_UNSUPPORTED_RUNTIME,
         )
     shown = _request_json("POST", "/api/show", {"model": tag}, timeout=30)
     details = shown.get("details") if isinstance(shown.get("details"), dict) else {}
@@ -303,7 +441,9 @@ def _generate(tag: str, prompt: str, generation: dict, num_predict: int | None =
         },
     )
     if not isinstance(data.get("response"), str):
-        raise QualityEvaluationError(f"Ollama returned no text response for '{tag}'")
+        raise QualityEvaluationError(
+            f"Ollama returned no text response for '{tag}'", failure_reason=FAILURE_REASON_UNKNOWN
+        )
     return data
 
 
@@ -339,7 +479,10 @@ def _speed_probe(tag: str, generation: dict, runs: int, runtime_options: dict | 
     for _ in range(runs):
         speed = _tokens_per_second(_generate_with_runtime(tag, prompt, generation, 64, runtime_options))
         if speed is None:
-            raise QualityEvaluationError(f"Ollama returned no timing metrics for '{tag}'")
+            raise QualityEvaluationError(
+                f"Ollama returned no timing metrics for '{tag}'",
+                failure_reason=FAILURE_REASON_NO_TIMING_METRICS,
+            )
         samples.append(speed)
     return SpeedSummary(statistics.median(samples), tuple(samples))
 
@@ -406,6 +549,48 @@ def evaluate_model(tag: str, pack: dict, speed_runs: int = 3, runtime_options: d
     }
 
 
+def _build_failure_entry(
+    tag: str,
+    error: QualityEvaluationError,
+    metadata: dict | None,
+    profile: "tuning.RuntimeProfile | None",
+    unloaded: bool,
+) -> dict:
+    """A v7-shaped failure result: no speed/sample fields are ever faked."""
+    reason = error.failure_reason
+    entry: dict = {
+        "tag": tag,
+        "outcome": outcome_for_failure_reason(reason),
+        "failure_reason": reason,
+        "measurement_isolation": {
+            "unloaded_after_run": unloaded,
+            "model_files_deleted": False,
+        },
+    }
+    if metadata:
+        # Best-effort: available whenever the failure happened after
+        # /api/show succeeded (e.g. OOM during generation), absent when the
+        # model couldn't even be looked up (e.g. not installed).
+        entry["model_metadata"] = {
+            "digest": metadata.get("digest"),
+            "size_bytes": metadata.get("size_bytes"),
+            "parameter_size": metadata.get("parameter_size"),
+            "quantization_level": metadata.get("quantization_level"),
+        }
+    if profile is not None:
+        # The runtime omm *attempted* to use - not a live /api/ps snapshot,
+        # since a model that never loaded can't be introspected there. This
+        # is exactly the signal a fit-classifier needs: "this hardware+
+        # runtime combination failed for this model."
+        entry["attempted_runtime"] = {
+            "context_length": profile.context_length,
+            "gpu_offload_percent": profile.gpu_offload_percent,
+            "cpu_threads": profile.cpu_threads,
+            "num_batch": profile.num_batch,
+        }
+    return entry
+
+
 def collect_evidence(
     tags: list[str],
     hardware: HardwareInfo,
@@ -421,21 +606,36 @@ def collect_evidence(
     pack, pack_sha256 = load_pack(pack_path)
     models = []
     for tag in tags:
+        metadata = None
+        profile = None
+        failure: QualityEvaluationError | None = None
+        result: dict | None = None
         try:
-            metadata = _model_metadata(tag)
-            profile = tuning.recommend_runtime_settings(hardware, metadata)
-            options = profile.ollama_options
             try:
-                result = evaluate_model(tag, pack, speed_runs=speed_runs,
-                                        runtime_options=options, model_metadata=metadata)
-            except TypeError:  # third-party/legacy monkeypatch compatibility
+                metadata = _model_metadata(tag)
+                profile = tuning.recommend_runtime_settings(hardware, metadata)
+                options = profile.ollama_options
+                try:
+                    result = evaluate_model(tag, pack, speed_runs=speed_runs,
+                                            runtime_options=options, model_metadata=metadata)
+                except TypeError:  # third-party/legacy monkeypatch compatibility
+                    result = evaluate_model(tag, pack, speed_runs=speed_runs)
+            except QualityEvaluationError:
+                # Preserve the public evaluator hook for callers which provide
+                # their own metadata/evaluator; it simply cannot emit v5 runtime.
                 result = evaluate_model(tag, pack, speed_runs=speed_runs)
-        except QualityEvaluationError:
-            # Preserve the public evaluator hook for callers which provide
-            # their own metadata/evaluator; it simply cannot emit v5 runtime.
-            result = evaluate_model(tag, pack, speed_runs=speed_runs)
+        except QualityEvaluationError as error:
+            # Both the runtime-aware attempt and the plain fallback failed:
+            # this model genuinely could not be benchmarked. Record it as a
+            # structured failure instead of aborting the whole batch, so
+            # sibling models already evaluated (or still to come) survive.
+            failure = error
         finally:
             unloaded = unload_model(tag)
+        if failure is not None or result is None:
+            models.append(_build_failure_entry(tag, failure, metadata, profile, unloaded))
+            continue
+        result["outcome"] = "success"
         result["measurement_isolation"] = {
             "unloaded_after_run": unloaded,
             "model_files_deleted": False,

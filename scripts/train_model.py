@@ -186,27 +186,60 @@ def _direct_bounded_number(value, minimum: float, maximum: float) -> float | Non
     return _bounded_number(value, minimum, maximum)
 
 
-def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, str | None]:
+#: v7 outcome enum (see docs/telemetry-v7.md). "success" carries a real
+#: tokens_per_sec measurement, exactly like v1-v6. "model_unfit" is a
+#: negative fit-classification label with no speed measurement at all.
+#: "transient_error" says nothing about fit and is excluded from every
+#: dataset below.
+V7_OUTCOMES = ("success", "model_unfit", "transient_error")
+
+#: Rejection reasons meaning "this row was correctly routed elsewhere, not
+#: that the data is malformed." validate_dataset() excludes these from its
+#: rejection-rate gate for exactly that reason.
+INTENTIONALLY_EXCLUDED_REASONS = frozenset({
+    "model_unfit_excluded_from_regression",
+    "transient_error_excluded",
+})
+
+
+def _extract_features_and_reason(
+    row: dict, *, require_speed: bool
+) -> tuple[list[float] | None, float | None, str | None]:
+    """Build a feature vector from a row's hardware/model/runtime metadata.
+
+    Shared by the speed-regression path (`_real_row_to_sample`, always
+    `require_speed=True`) and the fit-classification dataset
+    (`_real_row_to_fit_sample`, `require_speed=False` for v7 model_unfit
+    rows, which by design carry no speed measurement at all).
+
+    When `require_speed` is False, `tokens_per_sec`/sample-summary fields
+    are never consulted, and the returned tokens_per_sec is always None.
+    Every other check (runtime, model metadata, CPU metadata) is identical
+    to the require_speed=True path, so a model_unfit row is held to the
+    same "do we actually know what this is" bar as a real measurement.
+    """
     if not isinstance(row, dict):
-        return None, "not_an_object"
+        return None, None, "not_an_object"
     engine = row.get("engine") or "ollama"
     if engine not in ("ollama", "llama.cpp", "lmstudio"):
-        return None, "unsupported_engine"
+        return None, None, "unsupported_engine"
     benchmark_version = row.get("benchmark_version")
-    if benchmark_version not in (None, 1, 2, 3, 4, 5, 6):
-        return None, "unsupported_schema"
+    if benchmark_version not in (None, 1, 2, 3, 4, 5, 6, 7):
+        return None, None, "unsupported_schema"
 
     tokens_per_sec = _bounded_number(row.get("tokens_per_sec"), 0.0, 10_000.0)
     ram_gb = _bounded_number(row.get("ram_gb"), 1.0, 1024.0)
     vram_gb = _bounded_number(row.get("vram_gb"), 0.0, 512.0)
     gpu_tflops = _bounded_number(row.get("gpu_tflops"), 0.0, 1000.0)
-    is_v6 = benchmark_version == 6
-    if is_v6:
+    # "direct" = the explicit-metadata schema (v6 and its v7 successor),
+    # as opposed to the legacy name-parsing fallback used by v1-v5.
+    is_direct = benchmark_version in (6, 7)
+    if is_direct:
         required_runtime = (
             "runtime_profile", "context_length", "gpu_offload_percent", "cpu_threads", "num_batch",
         )
         if any(row.get(field) is None for field in required_runtime):
-            return None, "missing_runtime_metadata"
+            return None, None, "missing_runtime_metadata"
         context_length = _direct_bounded_number(row.get("context_length"), 256.0, 131072.0)
         gpu_offload_percent = _direct_bounded_number(row.get("gpu_offload_percent"), 0.0, 100.0)
         cpu_threads = _direct_bounded_number(row.get("cpu_threads"), 1.0, 1024.0)
@@ -218,17 +251,17 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         )
         cpu_threads = _bounded_number(row.get("cpu_threads", 0), 0.0, 1024.0)
         num_batch = _bounded_number(row.get("num_batch", 0), 0.0, 65536.0)
-    if tokens_per_sec is None or ram_gb is None:
-        return None, "invalid_measurement"
+    if (require_speed and tokens_per_sec is None) or ram_gb is None:
+        return None, None, "invalid_measurement"
     if None in (context_length, gpu_offload_percent, cpu_threads, num_batch):
-        return None, "invalid_runtime"
-    if benchmark_version in (4, 5, 6):
-        if is_v6 and any(
+        return None, None, "invalid_runtime"
+    if require_speed and benchmark_version in (4, 5, 6, 7):
+        if is_direct and any(
             row.get(field) is None
             for field in ("sample_count", "tokens_per_sec_min", "tokens_per_sec_max")
         ):
-            return None, "missing_sample_summary"
-        number_parser = _direct_bounded_number if is_v6 else _bounded_number
+            return None, None, "missing_sample_summary"
+        number_parser = _direct_bounded_number if is_direct else _bounded_number
         sample_count = number_parser(row.get("sample_count", 1), 1.0, 10.0)
         sample_min = number_parser(
             row.get("tokens_per_sec_min", tokens_per_sec), 0.0, 10_000.0
@@ -242,16 +275,16 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
             or sample_min is None
             or sample_max is None
             or not sample_min <= tokens_per_sec <= sample_max
-            or (is_v6 and sample_count < 3)
+            or (is_direct and sample_count < 3)
         ):
-            return None, "invalid_samples"
+            return None, None, "invalid_samples"
 
-    if is_v6:
+    if is_direct:
         required_model_metadata = (
             "parameter_count_b", "active_parameter_count_b", "quant_bits", "engine_version", "client_version",
         )
         if any(row.get(field) is None for field in required_model_metadata):
-            return None, "missing_model_metadata"
+            return None, None, "missing_model_metadata"
         param_count_b = _direct_bounded_number(row.get("parameter_count_b"), 0.0, 10_000.0)
         active_param_count_b = _direct_bounded_number(
             row.get("active_parameter_count_b"), 0.0, 10_000.0
@@ -273,7 +306,7 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
             or len(row["engine_version"]) > 100
             or len(row["client_version"]) > 100
         ):
-            return None, "invalid_model_metadata"
+            return None, None, "invalid_model_metadata"
         size_bytes = _bounded_number(row.get("model_size_bytes"), 1.0, 10**15)
         model_size_gb = (
             size_bytes / (1024**3)
@@ -295,11 +328,11 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         quant_bits = candidate_quant_bits(candidate)
         model_size_gb = estimate_model_size_gb(text, row.get("model_size_bytes"))
         if param_count_b is None or quant_bits is None or model_size_gb is None:
-            return None, "unparseable_model"
+            return None, None, "unparseable_model"
 
-    cpu_model = row.get("cpu_model") if is_v6 else ""
-    if is_v6 and (not isinstance(cpu_model, str) or not cpu_model.strip()):
-        return None, "missing_cpu_metadata"
+    cpu_model = row.get("cpu_model") if is_direct else ""
+    if is_direct and (not isinstance(cpu_model, str) or not cpu_model.strip()):
+        return None, None, "missing_cpu_metadata"
     cpu_score, cpu_tier = parse_chip_score(cpu_model if isinstance(cpu_model, str) else "")
     features = build_features(
         ram_gb=ram_gb,
@@ -318,7 +351,61 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
         active_param_count_b=active_param_count_b,
         engine=engine,
     )
+    return features, (tokens_per_sec if require_speed else None), None
+
+
+def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, str | None]:
+    """Speed-regression sample. v7 rows require an explicit `outcome`:
+    only "success" carries a real measurement; "model_unfit" and
+    "transient_error" are excluded here by design (see
+    `real_rows_to_fit_training_data_with_audit` for where model_unfit goes
+    instead) - never coerced into a fake tokens_per_sec=0 regression row.
+    """
+    if isinstance(row, dict) and row.get("benchmark_version") == 7:
+        outcome = row.get("outcome")
+        if outcome not in V7_OUTCOMES:
+            return None, "invalid_outcome"
+        if outcome == "transient_error":
+            return None, "transient_error_excluded"
+        if outcome == "model_unfit":
+            return None, "model_unfit_excluded_from_regression"
+    features, tokens_per_sec, reason = _extract_features_and_reason(row, require_speed=True)
+    if features is None:
+        return None, reason
     return (features, tokens_per_sec), None
+
+
+def _real_row_to_fit_sample(row: dict) -> tuple[tuple[list[float], bool] | None, str | None]:
+    """Fit/unfit classification sample, independent of speed regression.
+
+    Explicit v7 outcome takes priority: "model_unfit" contributes a
+    negative (fit=False) example built from best-effort model/runtime
+    metadata (no speed data involved), "transient_error" is excluded
+    entirely (it says nothing about fit), and "success" contributes a
+    positive example.
+
+    Legacy v1-v6 rows have no `outcome` field - this schema simply cannot
+    express a failure, so every valid legacy row is treated as an implicit
+    success (fit=True). This is the documented backward-compatibility path:
+    old data can only ever supply positive examples.
+    """
+    if not isinstance(row, dict):
+        return None, "not_an_object"
+    if row.get("benchmark_version") == 7:
+        outcome = row.get("outcome")
+        if outcome not in V7_OUTCOMES:
+            return None, "invalid_outcome"
+        if outcome == "transient_error":
+            return None, "transient_error_excluded"
+        if outcome == "model_unfit":
+            features, _tokens_per_sec, reason = _extract_features_and_reason(row, require_speed=False)
+            if features is None:
+                return None, reason
+            return (features, False), None
+    features, _tokens_per_sec, reason = _extract_features_and_reason(row, require_speed=True)
+    if features is None:
+        return None, reason
+    return (features, True), None
 
 
 def real_rows_to_training_data_with_audit(
@@ -330,6 +417,7 @@ def real_rows_to_training_data_with_audit(
     samples_used = 0
     samples_capped = 0
     direct_v6_groups: set[tuple[float, ...]] = set()
+    direct_v7_groups: set[tuple[float, ...]] = set()
     for row in rows:
         sample, reason = _real_row_to_sample(row)
         if sample is None:
@@ -341,10 +429,14 @@ def real_rows_to_training_data_with_audit(
         # median. This makes community retraining useful without allowing one
         # noisy client or a burst of duplicate uploads to dominate the fit.
         group_key = tuple(round(value, 3) for value in features)
-        if row.get("benchmark_version") == 6:
+        benchmark_version = row.get("benchmark_version")
+        if benchmark_version == 6:
             # Reaching this point means _real_row_to_sample accepted the
             # explicit v6 model, runtime, CPU, and sample metadata.
             direct_v6_groups.add(group_key)
+        elif benchmark_version == 7:
+            # Same explicit-metadata bar, via the v7 outcome="success" path.
+            direct_v7_groups.add(group_key)
         samples = groups.setdefault(group_key, [])
         if len(samples) < 50:
             samples.append(tokens_per_sec)
@@ -362,6 +454,7 @@ def real_rows_to_training_data_with_audit(
         "samples_capped": samples_capped,
         "unique_configurations": len(groups),
         "direct_v6_unique_configurations": len(direct_v6_groups),
+        "direct_v7_unique_configurations": len(direct_v7_groups),
         "duplicates_collapsed": samples_used - len(groups),
         "rejections": dict(sorted(rejections.items())),
     }
@@ -371,6 +464,46 @@ def real_rows_to_training_data_with_audit(
 def real_rows_to_training_data(rows: list[dict]) -> tuple[list[list[float]], list[float]]:
     X, y, _audit = real_rows_to_training_data_with_audit(rows)
     return X, y
+
+
+def real_rows_to_fit_training_data_with_audit(
+    rows: list[dict],
+) -> tuple[list[list[float]], list[bool], dict]:
+    """Build the fit/unfit classification dataset - separate from the speed
+    regression dataset above by design (see docs/telemetry-v7.md, "why two
+    datasets"). Positive examples come from any successful measurement
+    (v1-v7); negative examples come only from explicit v7 model_unfit rows.
+    transient_error rows are excluded entirely: a temporary hiccup says
+    nothing about whether the model fits.
+    """
+    fit_X: list[list[float]] = []
+    fit_y: list[bool] = []
+    rejections: dict[str, int] = {}
+    valid_rows = 0
+    positive_examples = 0
+    negative_examples = 0
+    for row in rows:
+        sample, reason = _real_row_to_fit_sample(row)
+        if sample is None:
+            rejections[reason or "unknown"] = rejections.get(reason or "unknown", 0) + 1
+            continue
+        valid_rows += 1
+        features, is_fit = sample
+        fit_X.append(list(features))
+        fit_y.append(is_fit)
+        if is_fit:
+            positive_examples += 1
+        else:
+            negative_examples += 1
+    audit = {
+        "raw_rows": len(rows),
+        "valid_rows": valid_rows,
+        "rejected_rows": len(rows) - valid_rows,
+        "positive_examples": positive_examples,
+        "negative_examples": negative_examples,
+        "rejections": dict(sorted(rejections.items())),
+    }
+    return fit_X, fit_y, audit
 
 
 def stable_holdout_split(
@@ -611,12 +744,18 @@ def main() -> None:
             input_sources=input_sources,
             evaluation=None,
         )
-        evaluation = compare_artifacts(candidate, baseline, holdout_X, holdout_y)
+        fit_X, fit_y, fit_audit = real_rows_to_fit_training_data_with_audit(real_rows)
+        # Evaluation-only: the regressor never trains on these (it only ever
+        # fits on real_X/real_y), so there is no train/holdout leakage risk
+        # in scoring the whole fit dataset here.
+        fit_examples = list(zip(fit_X, fit_y)) if fit_y else None
+        evaluation = compare_artifacts(candidate, baseline, holdout_X, holdout_y, fit_examples=fit_examples)
         evaluation.update(
             {
                 "holdout_fraction": args.holdout_fraction,
                 "training_rows": len(train_X),
                 "holdout_rows": len(holdout_X),
+                "fit_telemetry_audit": fit_audit,
             }
         )
         if args.quality_report:

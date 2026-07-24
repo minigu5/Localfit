@@ -112,8 +112,24 @@ def _selection_and_fit_metrics(
     X: list[list[float]],
     y: list[float],
     predictions: list[float],
+    *,
+    fit_labels: list[bool] | None = None,
+    fit_predictions: list[float] | None = None,
 ) -> dict:
-    """Compute recommendation and fit metrics without assuming feature positions."""
+    """Compute recommendation and fit metrics without assuming feature positions.
+
+    Fit (balanced accuracy / false-positive rate) prefers an explicit label
+    source when the caller provides one: pass `fit_labels` (ground truth,
+    e.g. v7's outcome=="model_unfit" -> False) alongside `fit_predictions`
+    (the same artifact's predictions on those same rows) to use it.
+
+    When both are None (the default), fit is inferred the legacy way: any
+    row with `actual >= 1.0` is "fit", everything else is "unfit". This is
+    the only signal available for v1-v6 telemetry, which has no way to
+    record a failed benchmark at all - see docs/telemetry-v7.md for why v7
+    exists and how migrating a caller to `fit_labels` changes nothing for
+    data that predates it.
+    """
     model_indices = {
         index for index, name in enumerate(feature_order) if name in _MODEL_FEATURES
     }
@@ -151,8 +167,11 @@ def _selection_and_fit_metrics(
         )
 
     positives = negatives = true_positives = true_negatives = false_positives = 0
-    for actual, prediction in zip(y, predictions):
-        actual_fit = actual >= 1.0
+    if fit_labels is not None and fit_predictions is not None:
+        fit_pairs = zip(fit_labels, fit_predictions)
+    else:
+        fit_pairs = ((actual >= 1.0, prediction) for actual, prediction in zip(y, predictions))
+    for actual_fit, prediction in fit_pairs:
         predicted_fit = prediction >= 1.0
         if actual_fit:
             positives += 1
@@ -185,8 +204,21 @@ def _selection_and_fit_metrics(
     }
 
 
-def evaluate_artifact(artifact: dict, X: list[list[float]], y: list[float]) -> dict:
-    """Evaluate a JSON tree ensemble on held-out, non-negative targets."""
+def evaluate_artifact(
+    artifact: dict,
+    X: list[list[float]],
+    y: list[float],
+    *,
+    fit_examples: list[tuple[list[float], bool]] | None = None,
+) -> dict:
+    """Evaluate a JSON tree ensemble on held-out, non-negative targets.
+
+    `fit_examples`, if given, is a list of (features, is_fit) pairs used
+    ONLY for the fit_balanced_accuracy/fit_false_positive_rate metrics -
+    e.g. from `scripts.train_model.real_rows_to_fit_training_data_with_audit`.
+    Omit it (the default) to fall back to inferring fit from `y >= 1.0`,
+    the only signal legacy (pre-v7) telemetry can express.
+    """
     feature_order = artifact.get("feature_order") if isinstance(artifact, dict) else None
     validate_artifact(artifact, feature_order)
     _validate_examples(X, y, feature_count=len(feature_order))
@@ -216,7 +248,20 @@ def evaluate_artifact(artifact: dict, X: list[list[float]], y: list[float]) -> d
         "rmsle": math.sqrt(sum(squared_log_errors) / rows),
         "p90_absolute_percentage_error": _percentile_90(absolute_percentage_errors),
     }
-    metrics.update(_selection_and_fit_metrics(feature_order, X, y, predictions))
+    fit_labels = fit_predictions = None
+    if fit_examples:
+        fit_labels = [bool(is_fit) for _features, is_fit in fit_examples]
+        fit_predictions = [
+            _finite_number(
+                predict_ensemble(artifact["trees"], features), "fit_examples prediction"
+            )
+            for features, _is_fit in fit_examples
+        ]
+    metrics.update(
+        _selection_and_fit_metrics(
+            feature_order, X, y, predictions, fit_labels=fit_labels, fit_predictions=fit_predictions
+        )
+    )
     return metrics
 
 
@@ -237,8 +282,15 @@ def compare_artifacts(
     max_p90_ape_regression: float = 0.05,
     max_selection_metric_regression: float = 0.05,
     min_selection_groups: int = 3,
+    fit_examples: list[tuple[list[float], bool]] | None = None,
 ) -> dict:
-    """Return a JSON-safe regression-gate report for two model artifacts."""
+    """Return a JSON-safe regression-gate report for two model artifacts.
+
+    `fit_examples` is forwarded to `evaluate_artifact` for both models, so
+    the fit_balanced_accuracy/fit_false_positive_rate comparison below uses
+    explicit outcome labels when the caller has them (see that function's
+    docstring for the legacy fallback when omitted).
+    """
     rmsle_threshold = _threshold(max_rmsle_regression, "max_rmsle_regression")
     p90_threshold = _threshold(max_p90_ape_regression, "max_p90_ape_regression")
     selection_threshold = _threshold(
@@ -252,8 +304,8 @@ def compare_artifacts(
     baseline_order = baseline.get("feature_order") if isinstance(baseline, dict) else None
     if candidate_order != baseline_order:
         raise ValueError("candidate and baseline feature_order must match")
-    candidate_metrics = evaluate_artifact(candidate, X, y)
-    baseline_metrics = evaluate_artifact(baseline, X, y)
+    candidate_metrics = evaluate_artifact(candidate, X, y, fit_examples=fit_examples)
+    baseline_metrics = evaluate_artifact(baseline, X, y, fit_examples=fit_examples)
     limits = {
         "rmsle": rmsle_threshold,
         "p90_absolute_percentage_error": p90_threshold,
@@ -305,13 +357,24 @@ def compare_artifacts(
     }
 
 
+#: Rejection reasons meaning "this row was routed to the fit-classification
+#: dataset instead, on purpose" (see scripts/train_model.py). These aren't
+#: data-quality problems, so they're excluded from the rejection-rate gate
+#: below - otherwise a healthy stream of v7 failure telemetry would look
+#: identical to a stream of malformed rows and eventually block training.
+_INTENTIONALLY_EXCLUDED_REASONS = frozenset({
+    "model_unfit_excluded_from_regression",
+    "transient_error_excluded",
+})
+
+
 def validate_dataset(
     audit: dict,
     *,
     min_unique_configurations: int = 20,
     max_rejection_rate: float = 0.25,
 ) -> None:
-    """Require enough direct-v6 telemetry configurations with bounded rejection."""
+    """Require enough direct-v6/v7 telemetry configurations with bounded rejection."""
     if not isinstance(audit, dict):
         raise ValueError("audit must be an object")
     if isinstance(min_unique_configurations, bool) or not isinstance(min_unique_configurations, int):
@@ -325,22 +388,36 @@ def validate_dataset(
     rejected_rows = audit.get("rejected_rows")
     unique = audit.get("unique_configurations")
     direct_v6_unique = audit.get("direct_v6_unique_configurations")
+    direct_v7_unique = audit.get("direct_v7_unique_configurations", 0)
     for name, value in (
         ("raw_rows", raw_rows),
         ("rejected_rows", rejected_rows),
         ("unique_configurations", unique),
         ("direct_v6_unique_configurations", direct_v6_unique),
+        ("direct_v7_unique_configurations", direct_v7_unique),
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ValueError(f"audit.{name} must be a non-negative integer")
     if rejected_rows > raw_rows:
         raise ValueError("audit.rejected_rows cannot exceed audit.raw_rows")
-    if direct_v6_unique > unique:
+    direct_unique = direct_v6_unique + direct_v7_unique
+    if direct_unique > unique:
         raise ValueError(
-            "audit.direct_v6_unique_configurations cannot exceed audit.unique_configurations"
+            "audit.direct_v6_unique_configurations plus "
+            "audit.direct_v7_unique_configurations cannot exceed audit.unique_configurations"
         )
-    if direct_v6_unique < min_unique_configurations:
+    if direct_unique < min_unique_configurations:
         raise InsufficientTelemetryError("dataset has too few unique direct-v6 configurations")
-    rejection_rate = 0.0 if raw_rows == 0 else rejected_rows / raw_rows
+
+    rejections = audit.get("rejections")
+    excluded = 0
+    if isinstance(rejections, dict):
+        excluded = sum(
+            count for reason, count in rejections.items()
+            if reason in _INTENTIONALLY_EXCLUDED_REASONS and isinstance(count, int) and count > 0
+        )
+    effective_raw = max(0, raw_rows - excluded)
+    effective_rejected = max(0, rejected_rows - excluded)
+    rejection_rate = 0.0 if effective_raw == 0 else effective_rejected / effective_raw
     if rejection_rate > maximum:
         raise InsufficientTelemetryError("dataset rejection rate exceeds limit")

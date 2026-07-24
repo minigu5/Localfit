@@ -184,4 +184,168 @@ assert.equal(unrelated.ok, false, "default-deny rule unexpectedly allowed anothe
 const readable = await request("telemetry", "GET");
 assert.equal(readable.ok, true, "public retraining read unexpectedly failed");
 
+// --- v7: structured success/failure telemetry -----------------------------
+
+const v7Success = {
+  ram_gb: 24,
+  vram_gb: 6,
+  unified_memory: false,
+  model_installed: "small:latest",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "success",
+  tokens_per_sec: 20.5,
+  parameter_count_b: 7,
+  active_parameter_count_b: 7,
+  quant_bits: 4,
+  engine_version: "0.32.1",
+  client_version: "0.1.64",
+  runtime_profile: "explicit_ollama_options",
+  context_length: 4096,
+  gpu_offload_percent: 100,
+  cpu_threads: 8,
+  num_batch: 512,
+  sample_count: 3,
+  tokens_per_sec_min: 19.5,
+  tokens_per_sec_max: 21.5,
+  cpu_model: "AMD Ryzen 5 5600X 6-Core Processor",
+  cpu_arch: "x86_64",
+  cpu_physical_cores: 6,
+  cpu_logical_cores: 12,
+};
+const v7SuccessCreated = await request("telemetry", "POST", v7Success);
+assert.equal(v7SuccessCreated.ok, true, `valid v7 success event was rejected (${v7SuccessCreated.status})`);
+
+const v7SuccessWithFailureReason = await request("telemetry", "POST", {
+  ...v7Success,
+  failure_reason: "unknown",
+});
+assert.equal(v7SuccessWithFailureReason.ok, false, "v7 success accepted a failure_reason field");
+
+const v7SuccessMissingTokens = await request("telemetry", "POST", {
+  ...v7Success,
+  tokens_per_sec: undefined,
+});
+assert.equal(v7SuccessMissingTokens.ok, false, "v7 success accepted a missing tokens_per_sec");
+
+const v7ModelUnfit = {
+  ram_gb: 24,
+  vram_gb: 6,
+  unified_memory: false,
+  model_installed: "too-big:latest",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "model_unfit",
+  failure_reason: "out_of_memory",
+  parameter_count_b: 70,
+  active_parameter_count_b: 70,
+  quant_bits: 4,
+  engine_version: "0.32.1",
+  client_version: "0.1.64",
+  cpu_model: "AMD Ryzen 5 5600X 6-Core Processor",
+  cpu_arch: "x86_64",
+  cpu_physical_cores: 6,
+  cpu_logical_cores: 12,
+};
+const v7ModelUnfitCreated = await request("telemetry", "POST", v7ModelUnfit);
+assert.equal(v7ModelUnfitCreated.ok, true, `valid v7 model_unfit event was rejected (${v7ModelUnfitCreated.status})`);
+
+const v7ModelUnfitLoadFailedRejected = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  failure_reason: "model_load_failed",
+});
+assert.equal(
+  v7ModelUnfitLoadFailedRejected.ok,
+  false,
+  "v7 model_unfit accepted model_load_failed - a missing/undiagnosed load failure is not fit evidence",
+);
+
+const v7ModelUnfitUnsupported = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  failure_reason: "unsupported_runtime",
+});
+assert.equal(v7ModelUnfitUnsupported.ok, true, "v7 model_unfit rejected unsupported_runtime");
+
+const v7TransientMinimal = await request("telemetry", "POST", {
+  ram_gb: 24,
+  unified_memory: false,
+  model_installed: "missing:latest",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "transient_error",
+  failure_reason: "model_load_failed",
+});
+assert.equal(
+  v7TransientMinimal.ok,
+  true,
+  "v7 transient_error (model_load_failed) rejected an event with no model metadata " +
+    "(e.g. tag never resolved / not yet downloaded)",
+);
+
+const v7ModelUnfitWrongLaneReason = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  failure_reason: "generation_timeout",
+});
+assert.equal(
+  v7ModelUnfitWrongLaneReason.ok,
+  false,
+  "v7 model_unfit accepted a transient_error-lane failure_reason",
+);
+
+const v7ModelUnfitFakeSpeed = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  tokens_per_sec: 0,
+  tokens_per_sec_min: 0,
+  tokens_per_sec_max: 0,
+  sample_count: 3,
+});
+assert.equal(v7ModelUnfitFakeSpeed.ok, false, "v7 model_unfit accepted a faked zero tokens_per_sec");
+
+const v7ModelUnfitMissingReason = await request("telemetry", "POST", {
+  ...v7ModelUnfit,
+  failure_reason: undefined,
+});
+assert.equal(v7ModelUnfitMissingReason.ok, false, "v7 model_unfit accepted a missing failure_reason");
+
+const v7Transient = {
+  ram_gb: 24,
+  vram_gb: 6,
+  unified_memory: false,
+  model_installed: "small:latest",
+  engine: "ollama",
+  benchmark_version: 7,
+  recorded_at: "2026-07-24T00:00:00+00:00",
+  outcome: "transient_error",
+  failure_reason: "ollama_unavailable",
+};
+const v7TransientCreated = await request("telemetry", "POST", v7Transient);
+assert.equal(v7TransientCreated.ok, true, `valid v7 transient_error event was rejected (${v7TransientCreated.status})`);
+
+for (const reason of ["model_load_failed", "generation_timeout", "connection_error", "no_timing_metrics", "unknown"]) {
+  const created = await request("telemetry", "POST", { ...v7Transient, failure_reason: reason });
+  assert.equal(created.ok, true, `v7 transient_error rejected failure_reason=${reason}`);
+}
+
+const v7TransientWrongLaneReason = await request("telemetry", "POST", {
+  ...v7Transient,
+  failure_reason: "out_of_memory",
+});
+assert.equal(
+  v7TransientWrongLaneReason.ok,
+  false,
+  "v7 transient_error accepted a model_unfit-lane failure_reason",
+);
+
+const v7InvalidOutcome = await request("telemetry", "POST", { ...v7Transient, outcome: "maybe" });
+assert.equal(v7InvalidOutcome.ok, false, "v7 accepted an invalid outcome enum value");
+
+const v7MissingOutcome = await request("telemetry", "POST", { ...v7Success, outcome: undefined });
+assert.equal(v7MissingOutcome.ok, false, "v7 accepted an event with no outcome at all");
+
+const v7UnknownField = await request("telemetry", "POST", { ...v7Transient, exception_message: "boom" });
+assert.equal(v7UnknownField.ok, false, "v7 accepted an unlisted field (e.g. raw exception text)");
+
 console.log("Firebase rules scenarios passed.");
