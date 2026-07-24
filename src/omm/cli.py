@@ -2212,6 +2212,18 @@ def benchmark_cmd(
         "--json",
         help="Also print the evidence JSON.",
     ),
+    confirm_performance_timeout: bool = typer.Option(
+        False,
+        "--confirm-performance-timeout",
+        help=(
+            "If a model's first generation attempt times out, wait for it to "
+            "fully finish, health-check the daemon, and retry exactly once "
+            "before deciding. Two confirmed timeouts under a healthy daemon "
+            "are reported as performance_unfit instead of transient_error. "
+            "Off by default: a single timeout is never auto-retried unless "
+            "you pass this flag."
+        ),
+    ),
 ) -> None:
     """Measure a small reproducible quality pack and decode speed."""
     models = [_resolve_benchmark_tag(m) for m in models]
@@ -2237,6 +2249,7 @@ def benchmark_cmd(
                 scan_hardware(),
                 pack_path=pack,
                 speed_runs=speed_runs,
+                confirm_performance_timeout=confirm_performance_timeout,
             )
             quality_mod.write_evidence(report, output)
         except quality_mod.QualityEvaluationError as error:
@@ -2245,6 +2258,7 @@ def benchmark_cmd(
 
         successes = [m for m in report["models"] if m.get("outcome", "success") == "success"]
         model_unfit = [m for m in report["models"] if m.get("outcome") == "model_unfit"]
+        performance_unfit = [m for m in report["models"] if m.get("outcome") == "performance_unfit"]
         transient = [m for m in report["models"] if m.get("outcome") == "transient_error"]
 
         if successes:
@@ -2272,6 +2286,12 @@ def benchmark_cmd(
             err_console.print(
                 f"[yellow]{entry['tag']}: doesn't fit this hardware "
                 f"({entry.get('failure_reason', 'unknown')})[/yellow]"
+            )
+        for entry in performance_unfit:
+            err_console.print(
+                f"[red]{entry['tag']}: confirmed twice that generation exceeds the "
+                f"timeout on this hardware - performance_unfit "
+                f"({entry.get('failure_reason', 'unknown')})[/red]"
             )
         for entry in transient:
             err_console.print(
@@ -2316,12 +2336,13 @@ def benchmark_cmd(
                     model_filename=(entry or {}).get("filename") or model["tag"],
                     model_digest=model.get("digest"),
                 )
-            for entry in model_unfit + transient:
+            for entry in model_unfit + performance_unfit + transient:
                 _report_failure_telemetry(entry, report.get("environment", {}))
 
         console.print(
             f"[bold]Summary:[/bold] {len(successes)} succeeded, "
-            f"{len(model_unfit)} model_unfit, {len(transient)} transient_error",
+            f"{len(model_unfit)} model_unfit, {len(performance_unfit)} performance_unfit, "
+            f"{len(transient)} transient_error",
             highlight=False,
         )
         if json_output:
@@ -2461,7 +2482,7 @@ def _report_telemetry(
 
 
 def _report_failure_telemetry(model: dict, environment: dict) -> bool:
-    """Upload a v7 model_unfit/transient_error event.
+    """Upload a v7 model_unfit/performance_unfit/transient_error event.
 
     Never sends tokens_per_sec, sample_count, or any speed field - a failed
     benchmark has no real measurement, and schema/tests/model_quality_gate.py
@@ -2470,8 +2491,22 @@ def _report_failure_telemetry(model: dict, environment: dict) -> bool:
     """
     outcome = model.get("outcome")
     reason = model.get("failure_reason")
-    if outcome not in ("model_unfit", "transient_error") or not isinstance(reason, str):
+    if outcome not in ("model_unfit", "transient_error", "performance_unfit") or not isinstance(reason, str):
         return False
+    if outcome == "performance_unfit":
+        # Only ever upload a well-formed confirmation verdict: exactly 2
+        # attempts and a real, positive timeout value. Anything else means
+        # the confirmation flow didn't actually run as designed - drop it
+        # rather than send a malformed event the Rules would reject anyway.
+        attempts = model.get("confirmation_attempts")
+        timeout_seconds = model.get("timeout_seconds")
+        if (
+            attempts != 2
+            or not isinstance(timeout_seconds, (int, float))
+            or isinstance(timeout_seconds, bool)
+            or not 0 < timeout_seconds <= 3600
+        ):
+            return False
     info = scan_hardware()
     tag = model.get("tag")
     event: dict = {
@@ -2485,6 +2520,9 @@ def _report_failure_telemetry(model: dict, environment: dict) -> bool:
         "failure_reason": reason,
         "recorded_at": datetime.now(timezone.utc).isoformat(),
     }
+    if outcome == "performance_unfit":
+        event["confirmation_attempts"] = attempts
+        event["timeout_seconds"] = timeout_seconds
     engine_version = environment.get("engine_version")
     if isinstance(engine_version, str) and engine_version:
         event["engine_version"] = engine_version

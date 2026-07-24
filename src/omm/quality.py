@@ -13,6 +13,7 @@ import math
 import platform
 import re
 import statistics
+import time
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -44,6 +45,11 @@ FAILURE_REASON_OLLAMA_UNAVAILABLE = "ollama_unavailable"
 FAILURE_REASON_CONNECTION_ERROR = "connection_error"
 FAILURE_REASON_NO_TIMING_METRICS = "no_timing_metrics"
 FAILURE_REASON_UNKNOWN = "unknown"
+# Only ever produced by the explicit confirmation flow (see
+# collect_evidence(..., confirm_performance_timeout=True) /
+# _confirm_generation_timeout below) - never by a single, unconfirmed
+# request. A lone generation_timeout stays a transient_error.
+FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT = "confirmed_generation_timeout"
 
 # A model/hardware combination that will never work regardless of retries.
 # Deliberately narrow: only reasons Ollama's own response makes explicit.
@@ -65,7 +71,28 @@ TRANSIENT_ERROR_REASONS = frozenset({
     FAILURE_REASON_NO_TIMING_METRICS,
     FAILURE_REASON_UNKNOWN,
 })
-FAILURE_REASONS = MODEL_UNFIT_REASONS | TRANSIENT_ERROR_REASONS
+# A model that loads but is too slow to finish a generation twice in a row
+# under identical conditions - a reproducible performance ceiling, not a
+# one-off hiccup (transient_error) and not an outright load/OOM failure
+# (model_unfit). Reached only through explicit, opt-in confirmation.
+PERFORMANCE_UNFIT_REASONS = frozenset({
+    FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT,
+})
+FAILURE_REASONS = MODEL_UNFIT_REASONS | TRANSIENT_ERROR_REASONS | PERFORMANCE_UNFIT_REASONS
+
+# The standard, non-configurable per-request timeout used for generation
+# calls (see _request_json's default). Confirmation-mode performance_unfit
+# events record this exact value as timeout_seconds - it must never be
+# shortened to manufacture a timeout.
+DEFAULT_GENERATION_TIMEOUT_SECONDS = 180
+# A client-side requests.ReadTimeout only ends *our* wait for a response -
+# it says nothing about whether Ollama's own generation goroutine actually
+# stopped. Before a confirmation attempt may run, we explicitly unload the
+# model (Ollama's own stop/keep_alive=0 API) and then poll /api/ps until it
+# actually reports the model gone, bounded by these two constants - never
+# an indefinite wait, and never trusting a fixed sleep as proof of anything.
+CONFIRMATION_UNLOAD_POLL_INTERVAL_SECONDS = 1
+CONFIRMATION_UNLOAD_MAX_WAIT_SECONDS = 30
 
 
 def outcome_for_failure_reason(failure_reason: str) -> str:
@@ -77,7 +104,11 @@ def outcome_for_failure_reason(failure_reason: str) -> str:
     never over-claiming that a model is unfit for hardware it merely had a
     one-off problem on.
     """
-    return "model_unfit" if failure_reason in MODEL_UNFIT_REASONS else "transient_error"
+    if failure_reason in MODEL_UNFIT_REASONS:
+        return "model_unfit"
+    if failure_reason in PERFORMANCE_UNFIT_REASONS:
+        return "performance_unfit"
+    return "transient_error"
 
 
 class QualityEvaluationError(RuntimeError):
@@ -239,7 +270,9 @@ def _classify_error_response(response) -> str:
     return FAILURE_REASON_UNKNOWN
 
 
-def _request_json(method: str, path: str, payload: dict | None = None, timeout: int = 180) -> dict:
+def _request_json(
+    method: str, path: str, payload: dict | None = None, timeout: int = DEFAULT_GENERATION_TIMEOUT_SECONDS
+) -> dict:
     try:
         response = requests.request(
             method,
@@ -420,6 +453,50 @@ def unload_model(tag: str) -> bool:
     return True
 
 
+def _model_is_loaded(tag: str) -> bool | None:
+    """Query Ollama's own residency list. True/False on a clear answer,
+    None if the daemon itself couldn't be reached - callers must treat
+    None as "not confirmed unloaded", never as "confirmed unloaded"."""
+    try:
+        models = _request_json("GET", "/api/ps", timeout=10).get("models")
+    except QualityEvaluationError:
+        return None
+    if not isinstance(models, list):
+        return None
+    return any(isinstance(item, dict) and _tag_matches(item.get("name"), tag) for item in models)
+
+
+def ensure_model_unloaded(
+    tag: str,
+    *,
+    max_wait_seconds: float = CONFIRMATION_UNLOAD_MAX_WAIT_SECONDS,
+    poll_interval_seconds: float = CONFIRMATION_UNLOAD_POLL_INTERVAL_SECONDS,
+) -> bool:
+    """Explicitly stop `tag` via Ollama's own API and prove it left memory.
+
+    A requests.ReadTimeout on our side only ends our own wait for a
+    response - it is not evidence that Ollama's internal generation
+    goroutine actually stopped. This calls the same stop/keep_alive=0
+    endpoint `unload_model` uses (never a subprocess kill, never restarting
+    the daemon, never sudo), then polls GET /api/ps - Ollama's own
+    residency list - until `tag` is actually absent from it. Polling is
+    bounded by `max_wait_seconds`; it never runs indefinitely, and if the
+    model still can't be confirmed gone by the deadline (or /api/ps itself
+    can't be queried), this returns False so the caller can refuse to start
+    a second, possibly-overlapping generation request.
+    """
+    unload_model(tag)
+    elapsed = 0.0
+    while True:
+        loaded = _model_is_loaded(tag)
+        if loaded is False:
+            return True
+        if elapsed >= max_wait_seconds:
+            return False
+        time.sleep(poll_interval_seconds)
+        elapsed += poll_interval_seconds
+
+
 def _generate(tag: str, prompt: str, generation: dict, num_predict: int | None = None,
               runtime_options: dict | None = None) -> dict:
     options = {
@@ -591,11 +668,155 @@ def _build_failure_entry(
     return entry
 
 
+def _evaluate_tag_once(
+    tag: str,
+    hardware: HardwareInfo,
+    pack: dict,
+    speed_runs: int,
+) -> dict:
+    """One full attempt for one tag: evaluate, then always unload.
+
+    Returns either a success dict (outcome="success") or a v7 failure dict
+    from _build_failure_entry (outcome in {"model_unfit", "transient_error"}).
+    This is the single source of truth for "what does one benchmark attempt
+    look like" - both the normal collect_evidence loop and the confirmation
+    flow below call it, so a confirmation attempt is guaranteed to use the
+    exact same model/runtime-selection logic as the first attempt.
+    """
+    metadata = None
+    profile = None
+    failure: QualityEvaluationError | None = None
+    result: dict | None = None
+    try:
+        try:
+            metadata = _model_metadata(tag)
+            profile = tuning.recommend_runtime_settings(hardware, metadata)
+            options = profile.ollama_options
+            try:
+                result = evaluate_model(tag, pack, speed_runs=speed_runs,
+                                        runtime_options=options, model_metadata=metadata)
+            except TypeError:  # third-party/legacy monkeypatch compatibility
+                result = evaluate_model(tag, pack, speed_runs=speed_runs)
+        except QualityEvaluationError:
+            # Preserve the public evaluator hook for callers which provide
+            # their own metadata/evaluator; it simply cannot emit v5 runtime.
+            result = evaluate_model(tag, pack, speed_runs=speed_runs)
+    except QualityEvaluationError as error:
+        # Both the runtime-aware attempt and the plain fallback failed:
+        # this model genuinely could not be benchmarked. Record it as a
+        # structured failure instead of aborting the whole batch, so
+        # sibling models already evaluated (or still to come) survive.
+        failure = error
+    finally:
+        unloaded = unload_model(tag)
+    if failure is not None or result is None:
+        return _build_failure_entry(tag, failure, metadata, profile, unloaded)
+    result["outcome"] = "success"
+    result["measurement_isolation"] = {
+        "unloaded_after_run": unloaded,
+        "model_files_deleted": False,
+    }
+    result.setdefault("runtime", None)
+    return result
+
+
+def _confirm_generation_timeout(
+    tag: str,
+    hardware: HardwareInfo,
+    pack: dict,
+    speed_runs: int,
+) -> dict:
+    """At most one confirmation attempt after a first generation_timeout.
+
+    Only ever called (by collect_evidence, opt-in) right after the first
+    attempt for `tag` finished with outcome=transient_error/
+    generation_timeout.
+
+    A client-side requests.ReadTimeout only ends *our* wait for a response;
+    it is not proof that Ollama's own generation goroutine actually
+    stopped. Before the confirmation attempt is allowed to run, this
+    explicitly stops the model via Ollama's own API and then proves it via
+    bounded GET /api/ps polling (see `ensure_model_unloaded`) that the
+    model has actually left memory - that is what guarantees the two
+    generation requests never overlap inside the daemon, not a fixed
+    sleep. If that can't be confirmed within the bounded wait, the second
+    request is never issued at all.
+
+    Returns exactly one final dict - never two, and never re-runs more than
+    once - so the caller uploads exactly one telemetry event for this tag:
+      - outcome=transient_error if the daemon/model isn't confirmed healthy
+        beforehand, or if the model can't be confirmed unloaded in time
+        (the second request is skipped entirely in that case).
+      - outcome=performance_unfit only if the confirmation attempt *also*
+        times out on generation while the daemon is otherwise healthy.
+      - outcome=success if the confirmation attempt succeeds (real speed
+        recorded, no fabricated 0). The confirmation attempt is allowed to
+        be a cold start - both attempts exist to check the same standard,
+        user-facing conditions, not to control for cache warmth.
+      - outcome=model_unfit if the confirmation attempt hits an explicit
+        OOM/unsupported-runtime error.
+      - outcome=transient_error for anything else the confirmation attempt
+        itself hits (daemon/connection trouble during that attempt).
+    """
+    # 6. Daemon health check before touching anything else.
+    if ollama_version() is None:
+        return _build_failure_entry(
+            tag,
+            QualityEvaluationError(
+                "Ollama daemon was not reachable before the confirmation attempt",
+                failure_reason=FAILURE_REASON_OLLAMA_UNAVAILABLE,
+            ),
+            None, None, True,
+        )
+    # 7. Same model still available.
+    try:
+        _model_metadata(tag)
+    except QualityEvaluationError as error:
+        return _build_failure_entry(tag, error, None, None, True)
+    # Explicitly unload and prove it via bounded /api/ps polling - never
+    # trust a fixed sleep as evidence the first generation actually ended
+    # inside Ollama. Unload *failure* itself is never a model_unfit/
+    # performance_unfit verdict - it just means we can't safely run a
+    # second request, so we stop here with an honest transient_error and
+    # never issue it.
+    if not ensure_model_unloaded(tag):
+        return _build_failure_entry(
+            tag,
+            QualityEvaluationError(
+                "could not confirm the first generation was fully unloaded "
+                "before a confirmation attempt",
+                failure_reason=FAILURE_REASON_UNKNOWN,
+            ),
+            None, None, False,
+        )
+    # 9. Confirmation attempt, same model/runtime, exactly once. A cold
+    # start here is fine by design (see docstring) - _evaluate_tag_once
+    # unloads again in its own `finally` regardless of outcome.
+    second = _evaluate_tag_once(tag, hardware, pack, speed_runs)
+    outcome = second.get("outcome")
+    if outcome == "transient_error" and second.get("failure_reason") == FAILURE_REASON_GENERATION_TIMEOUT:
+        # 10. Confirmed twice under a healthy daemon: a reproducible
+        # performance ceiling, not a one-off hiccup.
+        second["outcome"] = "performance_unfit"
+        second["failure_reason"] = FAILURE_REASON_CONFIRMED_GENERATION_TIMEOUT
+        second["confirmation_attempts"] = 2
+        second["timeout_seconds"] = DEFAULT_GENERATION_TIMEOUT_SECONDS
+    # 11. success, 12. model_unfit, or 13. some other transient_error -
+    # otherwise pass the confirmation attempt's own honest result through.
+    # Best-effort final cleanup so the confirmation flow never leaves
+    # memory pressure behind; a cleanup failure here must never change the
+    # verdict already decided above.
+    unload_model(tag)
+    return second
+
+
 def collect_evidence(
     tags: list[str],
     hardware: HardwareInfo,
     pack_path: Path | None = None,
     speed_runs: int = 3,
+    *,
+    confirm_performance_timeout: bool = False,
 ) -> dict:
     if not tags:
         raise QualityEvaluationError("at least one Ollama model tag is required")
@@ -606,42 +827,17 @@ def collect_evidence(
     pack, pack_sha256 = load_pack(pack_path)
     models = []
     for tag in tags:
-        metadata = None
-        profile = None
-        failure: QualityEvaluationError | None = None
-        result: dict | None = None
-        try:
-            try:
-                metadata = _model_metadata(tag)
-                profile = tuning.recommend_runtime_settings(hardware, metadata)
-                options = profile.ollama_options
-                try:
-                    result = evaluate_model(tag, pack, speed_runs=speed_runs,
-                                            runtime_options=options, model_metadata=metadata)
-                except TypeError:  # third-party/legacy monkeypatch compatibility
-                    result = evaluate_model(tag, pack, speed_runs=speed_runs)
-            except QualityEvaluationError:
-                # Preserve the public evaluator hook for callers which provide
-                # their own metadata/evaluator; it simply cannot emit v5 runtime.
-                result = evaluate_model(tag, pack, speed_runs=speed_runs)
-        except QualityEvaluationError as error:
-            # Both the runtime-aware attempt and the plain fallback failed:
-            # this model genuinely could not be benchmarked. Record it as a
-            # structured failure instead of aborting the whole batch, so
-            # sibling models already evaluated (or still to come) survive.
-            failure = error
-        finally:
-            unloaded = unload_model(tag)
-        if failure is not None or result is None:
-            models.append(_build_failure_entry(tag, failure, metadata, profile, unloaded))
-            continue
-        result["outcome"] = "success"
-        result["measurement_isolation"] = {
-            "unloaded_after_run": unloaded,
-            "model_files_deleted": False,
-        }
-        result.setdefault("runtime", None)
-        models.append(result)
+        entry = _evaluate_tag_once(tag, hardware, pack, speed_runs)
+        if (
+            confirm_performance_timeout
+            and entry.get("outcome") == "transient_error"
+            and entry.get("failure_reason") == FAILURE_REASON_GENERATION_TIMEOUT
+        ):
+            # Never uploaded on its own: the confirmation flow replaces this
+            # first-attempt dict with the single final verdict below, so
+            # exactly one event ever reaches the caller for this tag.
+            entry = _confirm_generation_timeout(tag, hardware, pack, speed_runs)
+        models.append(entry)
     return {
         "schema_version": 1,
         "created_at": datetime.now(timezone.utc).isoformat(),

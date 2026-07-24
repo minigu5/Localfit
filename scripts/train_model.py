@@ -187,17 +187,20 @@ def _direct_bounded_number(value, minimum: float, maximum: float) -> float | Non
 
 
 #: v7 outcome enum (see docs/telemetry-v7.md). "success" carries a real
-#: tokens_per_sec measurement, exactly like v1-v6. "model_unfit" is a
-#: negative fit-classification label with no speed measurement at all.
-#: "transient_error" says nothing about fit and is excluded from every
-#: dataset below.
-V7_OUTCOMES = ("success", "model_unfit", "transient_error")
+#: tokens_per_sec measurement, exactly like v1-v6. "model_unfit" and
+#: "performance_unfit" are both negative fit-classification labels with no
+#: speed measurement at all - the former from an explicit OOM/unsupported-
+#: runtime error, the latter from two confirmed generation timeouts under a
+#: healthy daemon. "transient_error" says nothing about fit and is excluded
+#: from every dataset below.
+V7_OUTCOMES = ("success", "model_unfit", "performance_unfit", "transient_error")
 
 #: Rejection reasons meaning "this row was correctly routed elsewhere, not
 #: that the data is malformed." validate_dataset() excludes these from its
 #: rejection-rate gate for exactly that reason.
 INTENTIONALLY_EXCLUDED_REASONS = frozenset({
     "model_unfit_excluded_from_regression",
+    "performance_unfit_excluded_from_regression",
     "transient_error_excluded",
 })
 
@@ -209,14 +212,16 @@ def _extract_features_and_reason(
 
     Shared by the speed-regression path (`_real_row_to_sample`, always
     `require_speed=True`) and the fit-classification dataset
-    (`_real_row_to_fit_sample`, `require_speed=False` for v7 model_unfit
-    rows, which by design carry no speed measurement at all).
+    (`_real_row_to_fit_sample`, `require_speed=False` for v7 model_unfit/
+    performance_unfit rows, which by design carry no speed measurement at
+    all).
 
     When `require_speed` is False, `tokens_per_sec`/sample-summary fields
     are never consulted, and the returned tokens_per_sec is always None.
     Every other check (runtime, model metadata, CPU metadata) is identical
-    to the require_speed=True path, so a model_unfit row is held to the
-    same "do we actually know what this is" bar as a real measurement.
+    to the require_speed=True path, so a model_unfit/performance_unfit row
+    is held to the same "do we actually know what this is" bar as a real
+    measurement.
     """
     if not isinstance(row, dict):
         return None, None, "not_an_object"
@@ -356,10 +361,11 @@ def _extract_features_and_reason(
 
 def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, str | None]:
     """Speed-regression sample. v7 rows require an explicit `outcome`:
-    only "success" carries a real measurement; "model_unfit" and
-    "transient_error" are excluded here by design (see
-    `real_rows_to_fit_training_data_with_audit` for where model_unfit goes
-    instead) - never coerced into a fake tokens_per_sec=0 regression row.
+    only "success" carries a real measurement; "model_unfit",
+    "performance_unfit", and "transient_error" are excluded here by design
+    (see `real_rows_to_fit_training_data_with_audit` for where model_unfit/
+    performance_unfit go instead) - never coerced into a fake
+    tokens_per_sec=0 regression row.
     """
     if isinstance(row, dict) and row.get("benchmark_version") == 7:
         outcome = row.get("outcome")
@@ -369,6 +375,8 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
             return None, "transient_error_excluded"
         if outcome == "model_unfit":
             return None, "model_unfit_excluded_from_regression"
+        if outcome == "performance_unfit":
+            return None, "performance_unfit_excluded_from_regression"
     features, tokens_per_sec, reason = _extract_features_and_reason(row, require_speed=True)
     if features is None:
         return None, reason
@@ -378,11 +386,12 @@ def _real_row_to_sample(row: dict) -> tuple[tuple[list[float], float] | None, st
 def _real_row_to_fit_sample(row: dict) -> tuple[tuple[list[float], bool] | None, str | None]:
     """Fit/unfit classification sample, independent of speed regression.
 
-    Explicit v7 outcome takes priority: "model_unfit" contributes a
-    negative (fit=False) example built from best-effort model/runtime
-    metadata (no speed data involved), "transient_error" is excluded
-    entirely (it says nothing about fit), and "success" contributes a
-    positive example.
+    Explicit v7 outcome takes priority: "model_unfit" and
+    "performance_unfit" both contribute a negative (fit=False) example
+    built from best-effort model/runtime metadata (no speed data involved -
+    a confirmed-timeout row is exactly as speed-less as an OOM row),
+    "transient_error" is excluded entirely (it says nothing about fit), and
+    "success" contributes a positive example.
 
     Legacy v1-v6 rows have no `outcome` field - this schema simply cannot
     express a failure, so every valid legacy row is treated as an implicit
@@ -397,7 +406,7 @@ def _real_row_to_fit_sample(row: dict) -> tuple[tuple[list[float], bool] | None,
             return None, "invalid_outcome"
         if outcome == "transient_error":
             return None, "transient_error_excluded"
-        if outcome == "model_unfit":
+        if outcome in ("model_unfit", "performance_unfit"):
             features, _tokens_per_sec, reason = _extract_features_and_reason(row, require_speed=False)
             if features is None:
                 return None, reason
@@ -479,9 +488,13 @@ def real_rows_to_fit_training_data_with_audit(
     """Build the fit/unfit classification dataset - separate from the speed
     regression dataset above by design (see docs/telemetry-v7.md, "why two
     datasets"). Positive examples come from any successful measurement
-    (v1-v7); negative examples come only from explicit v7 model_unfit rows.
-    transient_error rows are excluded entirely: a temporary hiccup says
-    nothing about whether the model fits.
+    (v1-v7); negative examples come from explicit v7 model_unfit rows (an
+    outright OOM/unsupported-runtime failure) and performance_unfit rows
+    (two confirmed generation timeouts under a healthy daemon). Both are
+    equally valid "this configuration does not work" evidence for the
+    classifier even though only model_unfit reflects a hardware capacity
+    failure. transient_error rows are excluded entirely: a temporary hiccup
+    says nothing about whether the model fits.
     """
     fit_X: list[list[float]] = []
     fit_y: list[bool] = []

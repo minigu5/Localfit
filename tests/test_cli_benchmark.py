@@ -236,7 +236,7 @@ def test_benchmark_summary_reports_mixed_outcomes_and_uploads_all_of_them(isolat
     result = runner.invoke(cli.app, ["benchmark", "small:latest", "big:latest", "flaky:latest"])
 
     assert result.exit_code == 0, result.stdout
-    assert "1 succeeded, 1 model_unfit, 1 transient_error" in result.stdout
+    assert "1 succeeded, 1 model_unfit, 0 performance_unfit, 1 transient_error" in result.stdout
     assert "small:latest" in result.stdout and "42.5 tok/s" in result.stdout
     # Only the succeeded model appears in the results table (it's the only
     # one with quality/speed columns to show); failures get a plain notice.
@@ -271,7 +271,7 @@ def test_benchmark_exits_nonzero_only_when_every_model_fails(isolated_omm_home, 
     result = runner.invoke(cli.app, ["benchmark", "big:latest", "flaky:latest"])
 
     assert result.exit_code == 1, result.stdout
-    assert "0 succeeded, 1 model_unfit, 1 transient_error" in result.stdout
+    assert "0 succeeded, 1 model_unfit, 0 performance_unfit, 1 transient_error" in result.stdout
 
 
 def test_benchmark_does_not_ask_to_upload_when_declined_for_mixed_outcomes(isolated_omm_home, monkeypatch):
@@ -311,3 +311,128 @@ def test_benchmark_starts_and_stops_daemon_when_confirmed(isolated_omm_home, mon
 
     assert result.exit_code == 0, result.stdout
     assert stopped == [started]
+
+
+# --- --confirm-performance-timeout wiring and performance_unfit upload ----
+
+
+def _performance_unfit_report():
+    return {
+        "schema_version": 1,
+        "pack": {"id": "localfit-gsm8k-bilingual-smoke", "version": "1.1.0"},
+        "environment": {"engine_version": "0.32.1"},
+        "models": [
+            {
+                "tag": "big:latest",
+                "outcome": "performance_unfit",
+                "failure_reason": "confirmed_generation_timeout",
+                "confirmation_attempts": 2,
+                "timeout_seconds": 180,
+                "model_metadata": {"parameter_size": "32B", "quantization_level": "Q8_0"},
+                "attempted_runtime": {
+                    "context_length": 4096, "gpu_offload_percent": 20, "cpu_threads": 8, "num_batch": 512,
+                },
+            },
+        ],
+    }
+
+
+def test_confirm_performance_timeout_flag_is_forwarded_to_collect_evidence(isolated_omm_home, monkeypatch):
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    seen = {}
+
+    def fake_collect_evidence(models, hw, pack_path=None, speed_runs=3, confirm_performance_timeout=False):
+        seen["confirm_performance_timeout"] = confirm_performance_timeout
+        return _full_report()
+
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", fake_collect_evidence)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+
+    runner.invoke(cli.app, ["benchmark", "small:latest", "--confirm-performance-timeout"])
+
+    assert seen["confirm_performance_timeout"] is True
+
+
+def test_confirm_performance_timeout_flag_defaults_to_false(isolated_omm_home, monkeypatch):
+    """Never auto-runs the second attempt without the explicit flag."""
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    seen = {}
+
+    def fake_collect_evidence(models, hw, pack_path=None, speed_runs=3, confirm_performance_timeout=False):
+        seen["confirm_performance_timeout"] = confirm_performance_timeout
+        return _full_report()
+
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", fake_collect_evidence)
+    monkeypatch.setattr(cli, "_ask_confirm", lambda *a, **k: False)
+
+    runner.invoke(cli.app, ["benchmark", "small:latest"])
+
+    assert seen["confirm_performance_timeout"] is False
+
+
+def test_benchmark_reports_and_uploads_performance_unfit_outcome(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_send_policy="always")
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", lambda *a, **k: _performance_unfit_report())
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append(event) or True)
+
+    result = runner.invoke(cli.app, ["benchmark", "big:latest", "--confirm-performance-timeout"])
+
+    assert result.exit_code == 1, result.stdout  # zero successes
+    assert "0 succeeded, 0 model_unfit, 1 performance_unfit, 0 transient_error" in result.stdout
+    assert "big:latest" in result.stderr and "performance_unfit" in result.stderr
+
+    assert len(sent) == 1  # 8. exactly one Firebase event for this tag - no duplicate upload
+    event = sent[0]
+    assert event["benchmark_version"] == 7
+    assert event["outcome"] == "performance_unfit"
+    assert event["failure_reason"] == "confirmed_generation_timeout"
+    assert event["confirmation_attempts"] == 2
+    assert event["timeout_seconds"] == 180
+    for forbidden in ("tokens_per_sec", "tokens_per_sec_min", "tokens_per_sec_max", "sample_count"):
+        assert forbidden not in event
+
+
+def test_performance_unfit_upload_rejected_when_confirmation_attempts_is_not_two(isolated_omm_home, monkeypatch):
+    """A malformed performance_unfit (wrong attempt count) is never
+    uploaded - the Rules would reject it anyway, so drop it client-side."""
+    config.update_config(telemetry_send_policy="always")
+    report = _performance_unfit_report()
+    report["models"][0]["confirmation_attempts"] = 1
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", lambda *a, **k: report)
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append(event) or True)
+
+    runner.invoke(cli.app, ["benchmark", "big:latest", "--confirm-performance-timeout"])
+
+    assert sent == []
+
+
+def test_performance_unfit_upload_rejected_when_timeout_seconds_missing(isolated_omm_home, monkeypatch):
+    config.update_config(telemetry_send_policy="always")
+    report = _performance_unfit_report()
+    del report["models"][0]["timeout_seconds"]
+    monkeypatch.setattr(cli.benchmark, "ollama_daemon_reachable", lambda: True)
+    monkeypatch.setattr(cli, "scan_hardware", _hardware)
+    monkeypatch.setattr(cli.quality_mod, "collect_evidence", lambda *a, **k: report)
+    monkeypatch.setattr(
+        cli, "_ask_confirm", lambda *a, **k: (_ for _ in ()).throw(AssertionError("no prompt"))
+    )
+    sent = []
+    monkeypatch.setattr(cli.telemetry, "send_event", lambda event, force=False: sent.append(event) or True)
+
+    runner.invoke(cli.app, ["benchmark", "big:latest", "--confirm-performance-timeout"])
+
+    assert sent == []
