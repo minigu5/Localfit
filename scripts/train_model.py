@@ -455,6 +455,13 @@ def real_rows_to_training_data_with_audit(
         "unique_configurations": len(groups),
         "direct_v6_unique_configurations": len(direct_v6_groups),
         "direct_v7_unique_configurations": len(direct_v7_groups),
+        # Union, not sum: a configuration benchmarked under both v6 and v7
+        # (same hardware/model/runtime feature vector, just a newer client)
+        # is one real training example, not two. This is the count the
+        # quality gate's min_unique_configurations threshold should compare
+        # against - see validate_dataset(). The per-version counts above
+        # stay purely diagnostic.
+        "direct_unique_configurations": len(direct_v6_groups | direct_v7_groups),
         "duplicates_collapsed": samples_used - len(groups),
         "rejections": dict(sorted(rejections.items())),
     }

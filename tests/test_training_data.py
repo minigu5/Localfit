@@ -261,6 +261,7 @@ def test_training_audit_explains_rejections_and_duplicate_collapse():
         "unique_configurations": 1,
         "direct_v6_unique_configurations": 0,
         "direct_v7_unique_configurations": 0,
+        "direct_unique_configurations": 0,
         "duplicates_collapsed": 1,
         "rejections": {
             "invalid_measurement": 1,
@@ -691,16 +692,62 @@ def test_v7_missing_outcome_is_rejected():
     assert reason == "invalid_outcome"
 
 
-def test_validate_dataset_sums_direct_v6_and_v7_configurations():
+def test_direct_unique_configurations_counts_distinct_v6_and_v7_separately():
     _X, _y, audit = train_model.real_rows_to_training_data_with_audit(
         [_v6_row(10), _v7_success_row(20, model_installed="other.gguf", parameter_count_b=3.0)]
     )
 
     assert audit["direct_v6_unique_configurations"] == 1
     assert audit["direct_v7_unique_configurations"] == 1
+    assert audit["direct_unique_configurations"] == 2
     validate_dataset(audit, min_unique_configurations=2)  # must not raise
     with pytest.raises(ValueError, match="too few unique direct-v6"):
         validate_dataset(audit, min_unique_configurations=3)
+
+
+def test_direct_unique_configurations_deduplicates_same_config_across_v6_and_v7():
+    """The exact bug this test guards against: a configuration measured
+    under both v6 and v7 (identical hardware/model/runtime feature vector,
+    just an older vs. newer client) is one real training example, not two.
+    direct_v6_unique_configurations + direct_v7_unique_configurations would
+    (wrongly) count it as 2; the quality gate must use the union instead.
+    """
+    _X, _y, audit = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20)]  # identical feature vector by default
+    )
+
+    assert audit["direct_v6_unique_configurations"] == 1
+    assert audit["direct_v7_unique_configurations"] == 1
+    assert audit["unique_configurations"] == 1
+    assert audit["direct_unique_configurations"] == 1
+
+    validate_dataset(audit, min_unique_configurations=1)  # must not raise
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
+        validate_dataset(audit, min_unique_configurations=2)
+
+
+def test_direct_unique_configurations_unaffected_by_transient_error():
+    _X, _y, audit_before = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20)]
+    )
+    _X2, _y2, audit_after = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20), _v7_transient_row()]
+    )
+
+    assert audit_after["direct_unique_configurations"] == audit_before["direct_unique_configurations"]
+    assert audit_after["unique_configurations"] == audit_before["unique_configurations"]
+
+
+def test_speed_regression_unique_configurations_unaffected_by_model_unfit():
+    _X, _y, audit_before = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20)]
+    )
+    _X2, _y2, audit_after = train_model.real_rows_to_training_data_with_audit(
+        [_v6_row(10), _v7_success_row(20), _v7_model_unfit_row()]
+    )
+
+    assert audit_after["direct_unique_configurations"] == audit_before["direct_unique_configurations"]
+    assert audit_after["unique_configurations"] == audit_before["unique_configurations"]
 
 
 def test_validate_dataset_excludes_intentional_v7_exclusions_from_rejection_rate():

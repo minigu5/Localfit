@@ -103,6 +103,44 @@ def test_compare_requires_matching_feature_contracts():
         compare_artifacts(artifact(1.0), artifact(1.0, feature_order=["ram"]), X, Y)
 
 
+def test_validate_dataset_prefers_explicit_direct_unique_over_sum():
+    # Same shape a real train_model.py audit produces: v6=1, v7=1, but the
+    # true union is 1 (one config measured under both schema versions).
+    # The sum (2) would wrongly pass a min=2 gate; the explicit union (1)
+    # correctly does not.
+    audit = {
+        "raw_rows": 2, "rejected_rows": 0, "unique_configurations": 1,
+        "direct_v6_unique_configurations": 1, "direct_v7_unique_configurations": 1,
+        "direct_unique_configurations": 1,
+    }
+    validate_dataset(audit, min_unique_configurations=1)  # must not raise
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
+        validate_dataset(audit, min_unique_configurations=2)
+
+
+def test_validate_dataset_falls_back_to_sum_when_union_field_is_absent():
+    # Pre-fix audits (e.g. hand-built in older tests/callers) never had
+    # direct_unique_configurations at all - validate_dataset must still
+    # accept them, reproducing the old sum-based count exactly.
+    audit = {
+        "raw_rows": 2, "rejected_rows": 0, "unique_configurations": 2,
+        "direct_v6_unique_configurations": 1, "direct_v7_unique_configurations": 1,
+    }
+    validate_dataset(audit, min_unique_configurations=2)  # must not raise
+    with pytest.raises(ValueError, match="too few unique direct-v6"):
+        validate_dataset(audit, min_unique_configurations=3)
+
+
+def test_validate_dataset_rejects_union_exceeding_the_sum_it_is_drawn_from():
+    audit = {
+        "raw_rows": 2, "rejected_rows": 0, "unique_configurations": 5,
+        "direct_v6_unique_configurations": 1, "direct_v7_unique_configurations": 1,
+        "direct_unique_configurations": 3,  # impossible: |A union B| <= |A| + |B|
+    }
+    with pytest.raises(ValueError, match="cannot exceed the sum"):
+        validate_dataset(audit, min_unique_configurations=1)
+
+
 def test_dataset_rejection_rate_must_be_a_fraction():
     with pytest.raises(ValueError, match="at most 1"):
         validate_dataset(
